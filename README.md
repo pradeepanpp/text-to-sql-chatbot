@@ -12,9 +12,11 @@ Bilingual Arabic–English natural language querying for relational databases wi
 </div>
 
 <!-- Replace with your actual screenshots -->
-![Dashboard Screenshot](docs/images/dashboard_english.png)
+<img width="1920" height="981" alt="Screenshot 2026-04-05 113851" src="https://github.com/user-attachments/assets/e6e59bfa-0c77-4caf-a84c-1cfc796af7ad" />
 
-![Arabic Query Screenshot](docs/images/dashboard_arabic.png)
+
+<img width="1920" height="981" alt="Screenshot 2026-04-05 114221" src="https://github.com/user-attachments/assets/2b3ecd0e-1cde-4142-94fb-c3861d9afe92" />
+
 
 ---
 
@@ -113,13 +115,6 @@ Six tables, 65,381 rows of regional sales data:
 | `state_regions` | 48 | State → region mapping |
 | `budgets` | 30 | 2017 product budget targets |
 | `products` | 30 | Product catalog |
-
----
-
-## API
-
-<!-- Replace with your actual Swagger screenshot -->
-![Swagger UI](docs/images/swagger_ui.png)
 
 
 
