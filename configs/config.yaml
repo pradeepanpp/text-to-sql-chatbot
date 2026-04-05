@@ -1,0 +1,17 @@
+# configs/config.yaml
+
+model:
+  name:        "gpt-4o-mini"
+  temperature: 0.0
+  max_tokens:  500
+
+database:
+  path:        "database/sales.db"
+  csv_dir:     "data/csv"
+
+chain:
+  max_retries:    3
+  max_result_rows: 100
+
+thresholds:
+  arabic_char_ratio: 0.20   # min ratio of Arabic chars to detect Arabic input

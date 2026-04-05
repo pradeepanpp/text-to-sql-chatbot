@@ -1,0 +1,33 @@
+# Core LLM — loose pins, let pip resolve compatible versions
+langchain
+langchain-openai
+langchain-community
+langchain-core
+openai
+
+# Database
+sqlalchemy
+pymysql
+
+# Data
+pandas
+numpy
+
+# Evaluation
+ragas
+datasets
+
+# API
+fastapi
+uvicorn
+pydantic
+
+# Dashboard
+streamlit
+
+# Utilities
+python-dotenv
+pyyaml
+
+# Testing
+pytest

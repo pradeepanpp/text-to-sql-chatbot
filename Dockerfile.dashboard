@@ -1,0 +1,24 @@
+# Dockerfile.dashboard — Streamlit frontend
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    streamlit \
+    requests
+
+COPY src/text_to_sql/dashboard/  src/text_to_sql/dashboard/
+COPY src/text_to_sql/__init__.py  src/text_to_sql/
+COPY src/text_to_sql/constants/   src/text_to_sql/constants/
+
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    API_BASE=http://api:8000
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", \
+     "src/text_to_sql/dashboard/app.py", \
+     "--server.port=8501", \
+     "--server.address=0.0.0.0", \
+     "--server.headless=true"]
