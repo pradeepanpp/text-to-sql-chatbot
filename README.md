@@ -87,9 +87,9 @@ Natural Language Question (English or Arabic)
 
 **Three generation strategies**
 
-- **Simple Chain** — direct single-step SQL generation for single-table lookups (~3s)
-- **Chain-of-Thought** — step-by-step reasoning before SQL generation for joins and aggregations (~6s)
-- **ReAct Agent** — LangGraph agent with 4 tools (`list_tables`, `get_schema`, `run_query`, `check_query`) for complex multi-table analysis (~30s)
+- **Simple Chain** — direct single-step SQL generation for single-table lookups 
+- **Chain-of-Thought** — step-by-step reasoning before SQL generation for joins and aggregations 
+- **ReAct Agent** — LangGraph agent with 4 tools (`list_tables`, `get_schema`, `run_query`, `check_query`) for complex multi-table analysis 
 
 **Five safety layers**
 
