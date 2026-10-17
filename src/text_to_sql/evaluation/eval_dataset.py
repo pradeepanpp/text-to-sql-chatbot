@@ -15,6 +15,12 @@ because the reference SQL did not answer the question as written —
 "average profit margin across all channels" (reference is per channel)
 and "correlation between order quantity and line total" (reference
 computes averages, not a correlation). The reference SQL is unchanged.
+
+Label fixes v2: total_unit_cost is a PER-UNIT cost (verified on all
+64,104 rows: line_total = order_quantity * unit_price, and
+total_unit_cost < unit_price). References 58, 61, 82, 92 and 98 used it
+as a line cost; corrected to order_quantity * total_unit_cost. Margin
+questions now ask for a percentage, and #98 returns only the warehouse.
 """
 
 # ─────────────────────────────────────────────
@@ -506,7 +512,7 @@ EVAL_DATASET = [
     },
     {
         "question":     "What is the total cost versus total revenue?",
-        "reference_sql": "SELECT SUM(total_unit_cost) as total_cost, SUM(line_total) as total_revenue FROM sales_orders",
+        "reference_sql": "SELECT SUM(order_quantity * total_unit_cost) as total_cost, SUM(line_total) as total_revenue FROM sales_orders",
         "reference_ans": "Total cost compared to total revenue.",
         "complexity":   "medium",
         "language":     "en",
@@ -529,8 +535,8 @@ EVAL_DATASET = [
         "tables":       ["sales_orders"],
     },
     {
-        "question":     "What is the total profit (line_total minus total_unit_cost) per channel?",
-        "reference_sql": "SELECT channel, SUM(line_total - total_unit_cost) as profit FROM sales_orders GROUP BY channel ORDER BY profit DESC",
+        "question":     "What is the total profit per channel?",
+        "reference_sql": "SELECT channel, SUM(line_total - order_quantity * total_unit_cost) as profit FROM sales_orders GROUP BY channel ORDER BY profit DESC",
         "reference_ans": "Total profit per channel.",
         "complexity":   "medium",
         "language":     "en",
@@ -702,8 +708,8 @@ EVAL_DATASET = [
         "tables":       ["sales_orders", "regions", "state_regions"],
     },
     {
-        "question":     "What is the total profit margin per product?",
-        "reference_sql": "SELECT p.product_name, SUM(s.line_total) as revenue, SUM(s.total_unit_cost) as cost, ROUND((SUM(s.line_total) - SUM(s.total_unit_cost)) / SUM(s.line_total) * 100, 2) as margin_pct FROM sales_orders s JOIN products p ON s.product_description_index = p.product_index GROUP BY p.product_name ORDER BY margin_pct DESC",
+        "question":     "What is the total profit margin percentage per product?",
+        "reference_sql": "SELECT p.product_name, ROUND((SUM(s.line_total) - SUM(s.order_quantity * s.total_unit_cost)) / SUM(s.line_total) * 100, 2) as margin_pct FROM sales_orders s JOIN products p ON s.product_description_index = p.product_index GROUP BY p.product_name ORDER BY margin_pct DESC",
         "reference_ans": "Profit margin percentage per product.",
         "complexity":   "complex",
         "language":     "en",
@@ -782,8 +788,8 @@ EVAL_DATASET = [
         "tables":       ["sales_orders", "products", "budgets"],
     },
     {
-        "question":     "What is the average profit margin for each channel?",
-        "reference_sql": "SELECT channel, ROUND(AVG((line_total - total_unit_cost) / line_total * 100), 2) as avg_margin FROM sales_orders GROUP BY channel",
+        "question":     "What is the average profit margin percentage for each channel?",
+        "reference_sql": "SELECT channel, ROUND(AVG((unit_price - total_unit_cost) / unit_price * 100), 2) as avg_margin_pct FROM sales_orders GROUP BY channel",
         "reference_ans": "Average profit margin per channel.",
         "complexity":   "complex",
         "language":     "en",
@@ -831,8 +837,8 @@ EVAL_DATASET = [
     },
     {
         "question":     "Which warehouse had the highest profit margin?",
-        "reference_sql": "SELECT warehouse_code, ROUND(AVG((line_total - total_unit_cost) / line_total * 100), 2) as margin FROM sales_orders GROUP BY warehouse_code ORDER BY margin DESC LIMIT 1",
-        "reference_ans": "Warehouse with the highest average profit margin.",
+        "reference_sql": "SELECT warehouse_code FROM sales_orders GROUP BY warehouse_code ORDER BY SUM(line_total - order_quantity * total_unit_cost) / SUM(line_total) DESC LIMIT 1",
+        "reference_ans": "Warehouse with the highest profit margin (total profit / total revenue).",
         "complexity":   "complex",
         "language":     "en",
         "tables":       ["sales_orders"],

@@ -52,7 +52,7 @@ TABLE_DESCRIPTIONS = {
         "channel, currency_code, warehouse_code, "
         "delivery_region_index (FK→regions.id), product_description_index (FK→products), "
         "order_quantity (INT), unit_price (REAL), line_total (REAL), "
-        "total_unit_cost (REAL)."
+        "total_unit_cost (REAL, cost of ONE unit; line cost = order_quantity * total_unit_cost)."
     ),
 }
 
