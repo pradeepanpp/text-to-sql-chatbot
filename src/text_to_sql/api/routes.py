@@ -1,6 +1,6 @@
 # src/text_to_sql/api/routes.py
 """
-FastAPI route handlers — Phase 5.
+FastAPI route handlers.
 
 Endpoints:
     POST /query           → single natural language query
@@ -8,12 +8,21 @@ Endpoints:
     GET  /schema          → database schema browser
     GET  /health          → system health check
     GET  /audit/stats     → audit log statistics
+    GET  /benchmark       → latest benchmark summary (if one has been run)
     GET  /                → welcome + docs link
+
+Why the handlers are plain `def`, not `async def`:
+the pipeline makes blocking calls (OpenAI over HTTP, SQLite). Inside an
+`async def` those would block the event loop, so one slow agent query
+would freeze every other request. FastAPI runs plain `def` handlers in a
+thread pool, so requests are served concurrently.
 """
 
-import sqlite3
+import json
+import os
+import threading
+
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
 
 from src.text_to_sql.api.schemas import (
     QueryRequest,
@@ -25,14 +34,18 @@ from src.text_to_sql.api.schemas import (
     HealthResponse,
     AuditStatsResponse,
 )
-from src.text_to_sql.chain.sql_chain import QueryResult
+from src.text_to_sql.chain.common import QueryResult
+from src.text_to_sql.database.executor import connect_readonly
 from src.text_to_sql.safety.sql_guard import get_audit_stats
 from src.text_to_sql.constants import TABLE_DESCRIPTIONS
 from src.text_to_sql.utils.logger import logger
 
 router = APIRouter()
 
-DB_PATH = "database/sales.db"
+DEFAULT_DB_PATH   = os.getenv("DB_PATH", "database/sales.db")
+BENCHMARK_RESULTS = "data/eval/benchmark_results.json"
+
+_stats_lock = threading.Lock()
 
 
 # ─────────────────────────────────────────────
@@ -52,6 +65,11 @@ def get_stats_counter(request: Request) -> dict:
     return request.app.state.stats
 
 
+def _db_path(request: Request) -> str:
+    chain = getattr(request.app.state, "chain", None)
+    return getattr(chain, "db_path", None) or DEFAULT_DB_PATH
+
+
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
@@ -62,24 +80,28 @@ def result_to_response(result: QueryResult) -> QueryResponse:
         question          = result.original_question,
         detected_language = result.detected_language,
         complexity        = result.complexity,
+        strategy          = result.strategy,
         generated_sql     = result.generated_sql or "",
         natural_response  = result.natural_response or "",
         execution_success = result.execution_success,
+        row_count         = result.row_count,
         blocked           = result.blocked,
         block_reason      = result.block_reason or "",
+        fallback_used     = result.fallback_used,
         retries_used      = result.retries_used,
     )
 
 
 def update_stats(stats: dict, result: QueryResult):
-    """Increment session counters."""
-    stats["total"]  += 1
-    if result.blocked:
-        stats["blocked"] += 1
-    elif result.execution_success:
-        stats["success"] += 1
-    else:
-        stats["failed"] += 1
+    """Increment session counters (thread-safe)."""
+    with _stats_lock:
+        stats["total"] += 1
+        if result.blocked:
+            stats["blocked"] += 1
+        elif result.execution_success:
+            stats["success"] += 1
+        else:
+            stats["failed"] += 1
 
 
 # ─────────────────────────────────────────────
@@ -87,11 +109,11 @@ def update_stats(stats: dict, result: QueryResult):
 # ─────────────────────────────────────────────
 
 @router.get("/", tags=["info"])
-async def root():
+def root():
     """Welcome message with API information."""
     return {
         "name":        "Text-to-SQL API",
-        "version":     "1.0.0",
+        "version":     "1.1.0",
         "description": "Bilingual Arabic-English Text-to-SQL with safety layer",
         "docs":        "/docs",
         "health":      "/health",
@@ -101,7 +123,8 @@ async def root():
             "schema":      "GET  /schema",
             "health":      "GET  /health",
             "audit_stats": "GET  /audit/stats",
-        }
+            "benchmark":   "GET  /benchmark",
+        },
     }
 
 
@@ -114,9 +137,9 @@ async def root():
         200: {"description": "Query processed"},
         422: {"description": "Validation error — blank or too long"},
         503: {"description": "Chain not initialized"},
-    }
+    },
 )
-async def query(
+def query(
     body:  QueryRequest,
     chain  = Depends(get_chain),
     stats  = Depends(get_stats_counter),
@@ -124,28 +147,23 @@ async def query(
     """
     Submit a natural language question and receive a SQL-backed answer.
 
-    - Supports **English and Arabic** questions
-    - Automatically detects language
+    - Supports **English and Arabic** questions (`language` overrides detection)
     - Routes to Simple / Chain-of-Thought / ReAct agent based on complexity
-    - Blocked if prompt injection or write SQL detected
-    - Full audit trail logged automatically
+    - Blocked if prompt injection or unsafe SQL is detected
+    - Every SQL execution is written to the audit log
     """
     try:
-        result   = chain.query(body.question)
-        response = result_to_response(result)
-        update_stats(stats, result)
-
-        logger.info(
-            f"[/query] lang={result.detected_language} "
-            f"complexity={result.complexity} "
-            f"blocked={result.blocked} "
-            f"success={result.execution_success}"
-        )
-        return response
-
+        result = chain.query(body.question, language=body.language)
     except Exception as e:
         logger.error(f"[/query] Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Query processing failed")
+
+    update_stats(stats, result)
+    logger.info(
+        f"[/query] lang={result.detected_language} strategy={result.strategy} "
+        f"blocked={result.blocked} success={result.execution_success}"
+    )
+    return result_to_response(result)
 
 
 @router.post(
@@ -153,51 +171,35 @@ async def query(
     response_model = BatchQueryResponse,
     tags           = ["query"],
     summary        = "Submit multiple questions at once (max 20)",
-    responses      = {
-        200: {"description": "Batch processed"},
-        422: {"description": "Validation error"},
-        503: {"description": "Chain not initialized"},
-    }
 )
-async def query_batch(
+def query_batch(
     body:  BatchQueryRequest,
     chain  = Depends(get_chain),
     stats  = Depends(get_stats_counter),
 ):
     """
-    Submit up to 20 questions in a single request.
+    Submit up to 20 questions in a single request (processed sequentially).
     Returns individual results for each question plus a summary.
     """
     try:
-        results   = chain.analyze_batch(body.questions)
-        responses = [result_to_response(r) for r in results]
-
-        # Build summary
-        complexity_dist = {"simple": 0, "medium": 0, "complex": 0}
-        for r in results:
-            if r.complexity in complexity_dist:
-                complexity_dist[r.complexity] += 1
-            update_stats(stats, r)
-
-        success_count = sum(1 for r in results if r.execution_success and not r.blocked)
-        blocked_count = sum(1 for r in results if r.blocked)
-
-        logger.info(
-            f"[/query/batch] {len(body.questions)} questions — "
-            f"success={success_count} blocked={blocked_count}"
-        )
-
-        return BatchQueryResponse(
-            results       = responses,
-            total         = len(responses),
-            success_count = success_count,
-            blocked_count = blocked_count,
-            summary       = complexity_dist,
-        )
-
+        results = chain.analyze_batch(body.questions)
     except Exception as e:
         logger.error(f"[/query/batch] Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Batch processing failed")
+
+    complexity_dist = {"simple": 0, "medium": 0, "complex": 0}
+    for r in results:
+        if r.complexity in complexity_dist:
+            complexity_dist[r.complexity] += 1
+        update_stats(stats, r)
+
+    return BatchQueryResponse(
+        results       = [result_to_response(r) for r in results],
+        total         = len(results),
+        success_count = sum(1 for r in results if r.execution_success and not r.blocked),
+        blocked_count = sum(1 for r in results if r.blocked),
+        summary       = complexity_dist,
+    )
 
 
 @router.get(
@@ -206,52 +208,35 @@ async def query_batch(
     tags           = ["database"],
     summary        = "Browse the database schema",
 )
-async def schema():
+def schema(request: Request):
     """
-    Returns the full database schema including all tables,
-    column names, row counts, and plain-English descriptions.
-    Useful for building a schema browser in the dashboard.
+    Returns all tables with column names, row counts and descriptions.
     """
     try:
-        conn   = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
+        conn = connect_readonly(_db_path(request))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
-        cursor.execute(
+    try:
+        names = [r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        )
-        table_names = [row[0] for row in cursor.fetchall()]
+        ).fetchall()]
 
-        tables     = []
-        total_rows = 0
-
-        for name in table_names:
-            # Get columns
-            cursor.execute(f"PRAGMA table_info({name})")
-            columns = [row[1] for row in cursor.fetchall()]
-
-            # Get row count
-            cursor.execute(f"SELECT COUNT(*) FROM {name}")
-            row_count = cursor.fetchone()[0]
+        tables, total_rows = [], 0
+        for name in names:
+            columns   = [r[1] for r in conn.execute(f'PRAGMA table_info("{name}")').fetchall()]
+            row_count = conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
             total_rows += row_count
-
             tables.append(SchemaTableInfo(
                 name        = name,
                 row_count   = row_count,
                 columns     = columns,
                 description = TABLE_DESCRIPTIONS.get(name, ""),
             ))
-
+    finally:
         conn.close()
 
-        return SchemaResponse(
-            tables       = tables,
-            total_tables = len(tables),
-            total_rows   = total_rows,
-        )
-
-    except Exception as e:
-        logger.error(f"[/schema] Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return SchemaResponse(tables=tables, total_tables=len(tables), total_rows=total_rows)
 
 
 @router.get(
@@ -260,39 +245,30 @@ async def schema():
     tags           = ["system"],
     summary        = "System health check",
 )
-async def health(request: Request):
+def health(request: Request):
     """
-    Returns the current health status of all system components.
-    - **ok**: all components healthy
+    - **ok**: chain loaded, guard active, database readable
     - **degraded**: one or more components unavailable
     """
-    chain       = request.app.state.chain
-    chain_ok    = chain is not None
-    guard_ok    = chain_ok and chain.guard is not None
+    chain    = request.app.state.chain
+    chain_ok = chain is not None
+    guard_ok = chain_ok and getattr(chain, "guard", None) is not None
 
-    # Check DB connection
     db_ok = False
-    try:
-        conn   = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1")
-        db_ok  = True
+    try:                                  # read-only: never creates an empty DB
+        conn = connect_readonly(_db_path(request))
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
         conn.close()
+        db_ok = True
     except Exception:
         pass
 
-    all_ok = chain_ok and guard_ok and db_ok
-    status = "ok" if all_ok else "degraded"
-
-    model = "gpt-4o-mini"
-    if chain_ok and hasattr(chain, "llm") and chain.llm:
-        try:
-            model = chain.llm.model_name
-        except Exception:
-            pass
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    if chain_ok:
+        model = getattr(chain.llm, "model_name", model)
 
     return HealthResponse(
-        status       = status,
+        status       = "ok" if (chain_ok and guard_ok and db_ok) else "degraded",
         chain_loaded = chain_ok,
         guard_active = guard_ok,
         db_connected = db_ok,
@@ -306,12 +282,8 @@ async def health(request: Request):
     tags           = ["system"],
     summary        = "Audit log statistics",
 )
-async def audit_stats():
-    """
-    Returns statistics from the audit log:
-    total queries, blocked count, block rate, and language breakdown.
-    For compliance monitoring in UAE banking/government deployments.
-    """
+def audit_stats():
+    """Counts from the audit log: events, blocked, suspicious, by language."""
     stats = get_audit_stats()
     return AuditStatsResponse(
         total       = stats.get("total", 0),
@@ -320,3 +292,18 @@ async def audit_stats():
         block_rate  = stats.get("block_rate", 0.0),
         by_language = stats.get("by_language", {}),
     )
+
+
+@router.get("/benchmark", tags=["system"], summary="Latest benchmark summary")
+def benchmark_summary():
+    """
+    Headline numbers from the most recent `scripts/run_benchmark.py` run.
+    Returns 404 until a benchmark has been run, so no number is ever
+    shown that the code did not produce.
+    """
+    if not os.path.exists(BENCHMARK_RESULTS):
+        raise HTTPException(status_code=404, detail="No benchmark has been run yet")
+    with open(BENCHMARK_RESULTS, encoding="utf-8") as f:
+        report = json.load(f)
+    return {k: report.get(k) for k in
+            ("meta", "overall", "by_complexity", "by_language", "router", "latency")}

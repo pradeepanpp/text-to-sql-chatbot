@@ -3,21 +3,28 @@
 Rich schema context builder.
 
 Feeds the LLM a detailed description of every table including:
-  - Column names and types
-  - Table descriptions in plain English
+  - Column names and types (read from the database, so always correct)
+  - Table descriptions in plain English (constants.py)
   - Sample rows (2 per table)
+  - Allowed values for low-cardinality text columns (e.g. channel)
   - Foreign key relationships
   - Row counts
 
 This is the single biggest factor in SQL generation accuracy.
 The more context the LLM has about the schema, the fewer
-hallucinated column names and wrong joins it produces.
+hallucinated column names, wrong joins and wrong filter values.
 """
 
 import sqlite3
 from functools import lru_cache
 from src.text_to_sql.utils.logger import logger
 from src.text_to_sql.constants import TABLE_DESCRIPTIONS, ALL_TABLES
+from src.text_to_sql.database.executor import connect_readonly
+
+# Text columns with at most this many distinct values get their values
+# listed in the prompt, so the LLM filters on real values
+# (e.g. channel = 'Wholesale') instead of guessing.
+MAX_DISTINCT_VALUES_LISTED = 12
 
 DB_PATH = "database/sales.db"
 
@@ -72,6 +79,36 @@ def get_sample_rows(conn: sqlite3.Connection, table: str, n: int = 2) -> str:
         return "  (sample rows unavailable)"
 
 
+def get_categorical_values(conn: sqlite3.Connection, table: str) -> str:
+    """
+    For TEXT columns with few distinct values, list those values.
+    Returns lines like:  channel: 'Distributor', 'Wholesale', ...
+    """
+    lines  = []
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({table})")
+    for col in cursor.fetchall():
+        name, col_type = col[1], (col[2] or "").upper()
+        if col_type and "TEXT" not in col_type and "CHAR" not in col_type:
+            continue
+        try:
+            cursor.execute(
+                f'SELECT COUNT(DISTINCT "{name}") FROM {table}'
+            )
+            n_distinct = cursor.fetchone()[0]
+            if n_distinct == 0 or n_distinct > MAX_DISTINCT_VALUES_LISTED:
+                continue
+            cursor.execute(
+                f'SELECT DISTINCT "{name}" FROM {table} '
+                f'WHERE "{name}" IS NOT NULL ORDER BY 1'
+            )
+            values = ", ".join(repr(r[0]) for r in cursor.fetchall())
+            lines.append(f"  {name}: {values}")
+        except Exception:
+            continue
+    return "\n".join(lines)
+
+
 def get_row_count(conn: sqlite3.Connection, table: str) -> int:
     """Returns row count for a table."""
     try:
@@ -90,7 +127,7 @@ def build_schema_context(db_path: str = DB_PATH) -> str:
 
     Returns a rich multi-section string covering all tables.
     """
-    conn = sqlite3.connect(db_path)
+    conn = connect_readonly(db_path)
 
     sections = []
     sections.append("DATABASE SCHEMA — Regional Sales System")
@@ -105,6 +142,7 @@ def build_schema_context(db_path: str = DB_PATH) -> str:
             schema_sql  = get_table_schema(conn, table)
             samples     = get_sample_rows(conn, table, n=2)
             description = TABLE_DESCRIPTIONS.get(table, "")
+            categorical = get_categorical_values(conn, table)
 
             section = (
                 f"Table: {table} ({count:,} rows)\n"
@@ -112,6 +150,8 @@ def build_schema_context(db_path: str = DB_PATH) -> str:
                 f"{schema_sql}\n"
                 f"Sample rows:\n{samples}"
             )
+            if categorical:
+                section += f"\nAllowed values:\n{categorical}"
             sections.append(section)
             sections.append("-" * 40)
 
@@ -126,7 +166,7 @@ def build_schema_context(db_path: str = DB_PATH) -> str:
 
 def get_table_names(db_path: str = DB_PATH) -> list:
     """Return list of available table names."""
-    conn   = sqlite3.connect(db_path)
+    conn   = connect_readonly(db_path)
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
     tables = [row[0] for row in cursor.fetchall()]
@@ -136,7 +176,7 @@ def get_table_names(db_path: str = DB_PATH) -> list:
 
 def get_column_names(table: str, db_path: str = DB_PATH) -> list:
     """Return column names for a specific table."""
-    conn   = sqlite3.connect(db_path)
+    conn   = connect_readonly(db_path)
     cursor = conn.cursor()
     cursor.execute(f"PRAGMA table_info({table})")
     cols   = [row[1] for row in cursor.fetchall()]

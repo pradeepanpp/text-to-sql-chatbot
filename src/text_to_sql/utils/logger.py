@@ -1,5 +1,5 @@
 # src/text_to_sql/utils/logger.py
-"""Shared logger — same pattern as jailbreak project."""
+"""Shared stdout logger used across the project."""
 
 import logging
 import sys

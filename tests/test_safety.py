@@ -3,7 +3,7 @@
 Tests for Phase 4 — Safety Layer.
 
 Tests cover:
-  - Prompt injection detection (English + Arabic)
+  - Prompt injection detection (English; Arabic is covered in test_offline.py)
   - SQL write operation blocking
   - SQL complexity guard
   - Row limit enforcement
@@ -313,8 +313,8 @@ def test_integration_with_chain():
     from dotenv import load_dotenv
     load_dotenv()
 
-    if not os.getenv("OPENAI_API_KEY"):
-        print("  ⏭  Tests 48-50 skipped: No OPENAI_API_KEY")
+    if not os.getenv("OPENAI_API_KEY") or not os.path.exists("database/sales.db"):
+        print("  ⏭  Tests 48-50 skipped: needs OPENAI_API_KEY and database/sales.db")
         return
 
     from src.text_to_sql.chain.sql_chain import TextToSQLChain

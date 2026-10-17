@@ -7,9 +7,11 @@ RUN pip install --no-cache-dir \
     streamlit \
     requests
 
-COPY src/text_to_sql/dashboard/  src/text_to_sql/dashboard/
+# The dashboard only talks to the API over HTTP; it needs just its own
+# package files (plus the package __init__ files for the import path).
+COPY src/__init__.py              src/
 COPY src/text_to_sql/__init__.py  src/text_to_sql/
-COPY src/text_to_sql/constants/   src/text_to_sql/constants/
+COPY src/text_to_sql/dashboard/   src/text_to_sql/dashboard/
 
 ENV PYTHONPATH=/app \
     PYTHONUNBUFFERED=1 \

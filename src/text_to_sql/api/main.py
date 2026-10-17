@@ -1,6 +1,6 @@
 # src/text_to_sql/api/main.py
 """
-FastAPI Application — Phase 5.
+FastAPI Application.
 
 Startup sequence:
   1. Load TextToSQLChain (LLM + SQLGuard + schema context)
@@ -56,7 +56,7 @@ async def lifespan(app: FastAPI):
     try:
         logger.info("Loading TextToSQLChain...")
         app.state.chain = TextToSQLChain(
-            db_path     = "database/sales.db",
+            db_path     = os.getenv("DB_PATH", "database/sales.db"),
             model       = os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             temperature = float(os.getenv("TEMPERATURE", "0.0")),
             max_tokens  = int(os.getenv("MAX_TOKENS", "500")),
@@ -109,18 +109,22 @@ def create_app() -> FastAPI:
             "- Row limit protection\n"
             "- Full audit trail"
         ),
-        version  = "1.0.0",
+        version  = "1.1.0",
         lifespan = lifespan,
         docs_url  = "/docs",
         redoc_url = "/redoc",
     )
 
-    # ── CORS — allows Streamlit dashboard ────
+    # ── CORS ─────────────────────────────────
+    # The Streamlit dashboard calls the API server-side, so CORS only
+    # matters for browser clients. Origins come from CORS_ORIGINS
+    # (comma-separated); credentials are never allowed with "*".
+    origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins     = ["*"],
-        allow_credentials = True,
-        allow_methods     = ["*"],
+        allow_origins     = origins,
+        allow_credentials = origins != ["*"],
+        allow_methods     = ["GET", "POST"],
         allow_headers     = ["*"],
     )
 
@@ -139,14 +143,12 @@ def create_app() -> FastAPI:
     # ── Global exception handler ──────────────
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
-        logger.error(f"Unhandled exception on {request.url.path}: {exc}")
+        # Full error goes to the server log only; the client gets a generic
+        # message so stack details and SQL errors are not leaked.
+        logger.exception(f"Unhandled exception on {request.url.path}: {exc}")
         return JSONResponse(
             status_code = 500,
-            content     = {
-                "error":  "Internal server error",
-                "detail": str(exc),
-                "code":   500,
-            }
+            content     = {"error": "Internal server error", "code": 500},
         )
 
     # ── Routes ────────────────────────────────
@@ -177,7 +179,7 @@ if __name__ == "__main__":
         "src.text_to_sql.api.main:app",
         host      = host,
         port      = port,
-        reload    = True,
+        reload    = os.environ.get("RELOAD", "0") == "1",
         workers   = 1,
         log_level = "warning",
     )

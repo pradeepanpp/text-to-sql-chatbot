@@ -16,6 +16,7 @@ Tabs:
     ABOUT    — system info
 """
 
+import os
 import sys
 sys.path.append(".")
 
@@ -32,7 +33,7 @@ from src.text_to_sql.dashboard.components import (
     EXAMPLE_PROMPTS,
 )
 
-API_BASE = "http://localhost:8000"
+API_BASE = os.getenv("API_BASE", "http://localhost:8000")
 
 # ─────────────────────────────────────────────
 # PAGE CONFIG
@@ -71,6 +72,15 @@ def init_state():
 def fetch_health() -> dict | None:
     try:
         r = requests.get(f"{API_BASE}/health", timeout=2)
+        return r.json() if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=300)
+def fetch_benchmark() -> dict | None:
+    try:
+        r = requests.get(f"{API_BASE}/benchmark", timeout=5)
         return r.json() if r.status_code == 200 else None
     except Exception:
         return None
@@ -376,7 +386,7 @@ def main():
                  "Complexity classifier — routes simple/medium/complex queries to the right strategy. Zero LLM cost.",
                  "#4a9eff"),
                 ("LAYER 2 · SIMPLE CHAIN",
-                 "Direct single-step SQL generation. 1 LLM call. Used for single-table lookups and basic aggregations.",
+                 "Direct single-step SQL generation. 2 LLM calls (SQL + answer). Used for single-table lookups and basic aggregations.",
                  "#4a9eff"),
                 ("LAYER 3 · COT CHAIN",
                  "Chain-of-thought reasoning before SQL generation. Used for joins, GROUP BY, rankings. Fewer errors.",
@@ -385,7 +395,7 @@ def main():
                  "LangGraph ReAct agent with 4 tools (list_tables, get_schema, run_query, check_query). Multi-step reasoning for complex cross-table analysis.",
                  "#b06aff"),
                 ("LAYER 5 · SQL GUARD",
-                 "Prompt injection detection. Write-operation blocking. Row limit enforcement. Full JSONL audit trail.",
+                 "Prompt injection check (question + translation). SELECT-only, read-only connection, row limit, timeout. Every execution audited to JSONL.",
                  "#22aa44"),
             ]
 
@@ -413,17 +423,27 @@ def main():
             ◈ BENCHMARK RESULTS</div>
             """, unsafe_allow_html=True)
 
-            metrics = [
-                ("Overall Accuracy",       "97%",    "#22aa44"),
-                ("Simple Queries",         "100%",   "#22aa44"),
-                ("Medium Queries",         "100%",   "#22aa44"),
-                ("Complex Queries",        "88%",    "#c9a84c"),
-                ("English Accuracy",       "96.5%",  "#22aa44"),
-                ("Arabic Accuracy",        "100%",   "#22aa44"),
-                ("ML Classifier F1",       "0.884",  "#4a9eff"),
-                ("Injection Patterns",     "16",     "#4a9eff"),
-                ("Write Ops Blocked",      "8 types","#4a9eff"),
-            ]
+            # Numbers come from the latest benchmark run via the API —
+            # nothing is hard-coded here.
+            bench   = fetch_benchmark()
+            metrics = []
+            if bench:
+                ov = bench.get("overall", {})
+                ci = ov.get("execution_accuracy_ci95", [0, 0])
+                metrics.append((
+                    "Execution Accuracy",
+                    f"{ov.get('execution_accuracy', 0):.1%} "
+                    f"(95% CI {ci[0]:.0%}–{ci[1]:.0%})",
+                    "#22aa44",
+                ))
+                for tier, vals in bench.get("by_complexity", {}).items():
+                    metrics.append((f"{tier.title()} Queries", f"{vals['accuracy']:.0%}", "#4a9eff"))
+                for lang, vals in bench.get("by_language", {}).items():
+                    name = "English" if lang == "en" else "Arabic"
+                    metrics.append((f"{name} (n={vals['total']})", f"{vals['accuracy']:.0%}", "#4a9eff"))
+                metrics.append(("Questions", str(bench.get("meta", {}).get("total_questions", "—")), "#3d5a80"))
+            else:
+                metrics.append(("Benchmark", "not run yet — scripts/run_benchmark.py", "#c9a84c"))
 
             for label, value, color in metrics:
                 st.markdown(f"""

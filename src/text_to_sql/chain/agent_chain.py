@@ -1,136 +1,110 @@
 # src/text_to_sql/chain/agent_chain.py
 """
-ReAct Agent Chain — Phase 2 (updated with rate limit retry).
+ReAct Agent Chain — LangGraph agent for complex multi-table queries.
 
-LangGraph-powered ReAct agent for complex multi-table queries.
-The agent reasons iteratively, choosing tools at each step.
+The agent loops: reason -> call a tool -> read the result -> repeat,
+until it can answer.
 
-Tools available:
-    list_tables    → shows all available table names
-    get_schema     → returns schema for specific tables
-    run_query      → executes a SQL SELECT query
-    check_query    → validates SQL before execution
+Tools:
+    list_tables  → table names
+    get_schema   → columns + row count for named tables
+    run_query    → run a SELECT through SQLGuard (read-only, audited)
+    check_query  → policy check + EXPLAIN QUERY PLAN, no execution
 
-Strategy: reason → act → observe → repeat → final answer
-Speed: slowest (~8-15 seconds)
-Cost: highest (~500-1000 tokens)
+Bookkeeping (what makes the result trustworthy):
+  - Tools are built per request, so each request records its own list
+    of executed SQL. The final `generated_sql` is the last query that
+    ran successfully — read from tool calls, not regex-scraped from text.
+  - execution_success is True only if at least one query succeeded and
+    the agent produced a final answer.
+  - The loop is capped (AGENT_RECURSION_LIMIT) so a confused agent
+    cannot spin forever.
 
-Rate limit handling:
-    - Detects 429 errors automatically
-    - Retries up to 3 times with exponential backoff
-    - Waits 60s → 120s → 180s between retries
-    - Logs wait time clearly so user knows what's happening
-
-Examples:
-    "Compare sales vs budget for each product in the South region"
-    "Which customers ranked in top 10 for both quantity and revenue?"
-    "What percentage of total sales came from each region?"
+LLM calls: one per reasoning step (typically 3–8).
 """
 
-import os
 import re
 import time
-import sqlite3
-from langchain_openai import ChatOpenAI
-from langchain_core.tools import tool
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langgraph.prebuilt import create_react_agent
 
-from src.text_to_sql.chain.sql_chain import (
-    validate_sql_safety,
-    QueryResult,
-)
+from langchain_core.messages import AIMessage
+from langgraph.prebuilt import create_react_agent
+from langchain_core.tools import tool
+
+from src.text_to_sql.chain.common import QueryResult, is_infra_error
+from src.text_to_sql.database.executor import connect_readonly, format_rows
 from src.text_to_sql.utils.logger import logger
 
-DB_PATH = "database/sales.db"
+STRATEGY = "agent"
 
-# ── Rate limit retry settings ─────────────────
-MAX_RETRIES       = 3
-RETRY_WAIT_BASE   = 120    # seconds — first retry waits 60s
-RATE_LIMIT_SIGNAL = "429" # string to detect in error messages
+# ── Loop and retry limits ─────────────────────
+AGENT_RECURSION_LIMIT = 16   # graph steps; one tool round = 2 steps → ~7 tool calls
+MAX_ATTEMPTS          = 2    # whole-agent attempts on rate limit (429)
+MAX_WAIT_S            = 30   # cap on backoff so an API request never hangs for minutes
+ROWS_SHOWN_TO_AGENT   = 20
 
-AGENT_SYSTEM_PROMPT = """You are an expert SQL analyst with access to a regional sales database.
+AGENT_SYSTEM_PROMPT = """You are an expert SQL analyst with access to a regional sales database (SQLite).
 
 Your job: answer questions by querying the database step by step.
 
 RULES:
-1. Always check available tables first if unsure
-2. Always validate your SQL logic before running
+1. Check available tables and their schema before writing SQL
+2. Validate complex SQL with check_query before running it
 3. Only use SELECT queries — never modify data
-4. If a query fails, fix it and try again
-5. Give a clear, concise natural language answer at the end
+4. If a query fails, read the error, fix the query and try again
+5. Finish with a clear, concise natural-language answer that includes
+   the key numbers. Do not mention SQL or tools in the final answer.
 
-Available tools:
+Tools:
 - list_tables: see all table names
 - get_schema: get column details for specific tables
 - run_query: execute a SELECT SQL query
-- check_query: validate your SQL before running it
-
-Work methodically. Think before each tool call."""
-
-FORMAT_PROMPT = ChatPromptTemplate.from_template("""
-Given the agent's findings, write a clear final answer to the question.
-Be specific with numbers. Do not mention SQL or tools.
-
-Question: {question}
-Agent findings: {findings}
-
-Final Answer:""")
+- check_query: validate SQL without running it"""
 
 
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
 
-def _is_rate_limit_error(error: Exception) -> bool:
-    """Check if an exception is an OpenAI rate limit (429) error."""
-    return RATE_LIMIT_SIGNAL in str(error)
-
-
 def _extract_retry_wait(error: Exception) -> int:
     """
-    Try to extract the suggested wait time from the rate limit
-    error message. Falls back to RETRY_WAIT_BASE if not found.
-
-    OpenAI errors contain text like:
-    'Please try again in 760ms' or 'Please try again in 63s'
+    Read the suggested wait from an OpenAI rate-limit message, e.g.
+    'Please try again in 760ms' or 'Please try again in 6s'.
     """
-    error_str = str(error)
-
-    # Look for milliseconds
-    ms_match = re.search(r"try again in (\d+)ms", error_str)
-    if ms_match:
-        ms = int(ms_match.group(1))
-        # Round up to nearest second + 5s buffer
-        return max(5, (ms // 1000) + 5)
-
-    # Look for seconds
-    s_match = re.search(r"try again in (\d+)s", error_str)
-    if s_match:
-        return int(s_match.group(1)) + 5  # add 5s buffer
-
-    return RETRY_WAIT_BASE
+    text = str(error)
+    ms = re.search(r"try again in (\d+)ms", text)
+    if ms:
+        return max(1, int(ms.group(1)) // 1000 + 1)
+    s = re.search(r"try again in (\d+(?:\.\d+)?)s", text)
+    if s:
+        return int(float(s.group(1))) + 1
+    return 10
 
 
-# ─────────────────────────────────────────────
-# TOOLS — built with db_path closure
-# ─────────────────────────────────────────────
+def _list_table_names(db_path: str) -> list:
+    conn = connect_readonly(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows]
 
-def make_tools(db_path: str):
-    """Create tool functions bound to a specific database path."""
+
+def make_tools(db_path: str, guard, question: str = "", language: str = "en",
+               executed: list = None) -> list:
+    """
+    Build the agent's tools for ONE request.
+
+    `executed` collects one dict per run_query call:
+        {"sql", "ok", "blocked", "row_count", "error"}
+    """
+    executed = executed if executed is not None else []
 
     @tool
     def list_tables() -> str:
         """List all available table names in the database."""
-        conn   = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        )
-        tables = [row[0] for row in cursor.fetchall()]
-        conn.close()
-        return f"Available tables: {', '.join(tables)}"
+        return f"Available tables: {', '.join(_list_table_names(db_path))}"
 
     @tool
     def get_schema(table_names: str) -> str:
@@ -138,25 +112,21 @@ def make_tools(db_path: str):
         Get the column schema for one or more tables.
         Pass comma-separated table names, e.g. 'customers,sales_orders'
         """
-        conn    = sqlite3.connect(db_path)
-        cursor  = conn.cursor()
-        tables  = [t.strip() for t in table_names.split(",")]
+        known   = set(_list_table_names(db_path))
+        tables  = [t.strip() for t in table_names.split(",") if t.strip()]
         results = []
-
-        for table in tables:
-            try:
-                cursor.execute(f"PRAGMA table_info({table})")
-                cols     = cursor.fetchall()
+        conn    = connect_readonly(db_path)
+        try:
+            for table in tables:
+                if table not in known:      # never interpolate unknown names into SQL
+                    results.append(f"Table '{table}': does not exist")
+                    continue
+                cols     = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
                 col_info = ", ".join(f"{c[1]} ({c[2]})" for c in cols)
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
-                count = cursor.fetchone()[0]
-                results.append(
-                    f"Table '{table}' ({count:,} rows):\n  {col_info}"
-                )
-            except Exception as e:
-                results.append(f"Table '{table}': Error — {e}")
-
-        conn.close()
+                count    = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                results.append(f"Table '{table}' ({count:,} rows):\n  {col_info}")
+        finally:
+            conn.close()
         return "\n\n".join(results)
 
     @tool
@@ -165,59 +135,54 @@ def make_tools(db_path: str):
         Execute a SELECT SQL query and return results.
         Only SELECT queries are allowed — no data modification.
         """
-        is_safe, reason = validate_sql_safety(sql)
-        if not is_safe:
-            return f"BLOCKED: {reason}"
-
-        try:
-            conn   = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            rows   = cursor.fetchmany(20)
-
-            if not rows:
-                conn.close()
-                return "Query executed successfully. No results returned."
-
-            cols  = [d[0] for d in cursor.description]
-            lines = [" | ".join(cols), "-" * 40]
-            for row in rows:
-                lines.append(" | ".join(str(v) for v in row))
-
-            if len(rows) == 20:
-                cursor.execute(
-                    f"SELECT COUNT(*) FROM ({sql}) AS subq"
-                )
-                total = cursor.fetchone()[0]
-                lines.append(f"(showing 20 of {total:,} total rows)")
-
-            conn.close()
-            return "\n".join(lines)
-
-        except Exception as e:
-            return f"Query failed: {str(e)}"
+        run = guard.execute(
+            sql, db_path=db_path, question=question,
+            language=language, strategy=STRATEGY,
+        )
+        executed.append({
+            "sql":       run.sql,
+            "ok":        run.ok,
+            "blocked":   run.blocked,
+            "row_count": run.result.row_count if run.ok else 0,
+            "error":     run.block_reason or run.error,
+        })
+        if run.blocked:
+            return f"BLOCKED: {run.block_reason}"
+        if not run.ok:
+            return f"Query failed: {run.error}"
+        if not run.result.rows:
+            return "Query executed successfully. No results returned."
+        return format_rows(run.result, ROWS_SHOWN_TO_AGENT)
 
     @tool
     def check_query(sql: str) -> str:
         """
-        Validate SQL syntax without executing it.
+        Validate SQL without executing it.
         Use this to check your query before running it.
         """
-        is_safe, reason = validate_sql_safety(sql)
-        if not is_safe:
-            return f"UNSAFE: {reason}"
-
+        report = guard.inspect_sql(sql)
+        if not report.passed:
+            return f"UNSAFE: {report.reason}"
+        conn = connect_readonly(db_path)
         try:
-            conn   = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute(f"EXPLAIN QUERY PLAN {sql}")
-            plan = cursor.fetchall()
-            conn.close()
+            plan = conn.execute(f"EXPLAIN QUERY PLAN {report.sanitized_sql}").fetchall()
             return f"SQL is valid. Query plan has {len(plan)} step(s)."
         except Exception as e:
-            return f"SQL has an error: {str(e)}"
+            return f"SQL has an error: {e}"
+        finally:
+            conn.close()
 
     return [list_tables, get_schema, run_query, check_query]
+
+
+def _final_answer(messages: list) -> str:
+    """Last AI message that has text and does not request a tool call."""
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and not msg.tool_calls:
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            if content.strip():
+                return content.strip()
+    return ""
 
 
 # ─────────────────────────────────────────────
@@ -225,158 +190,83 @@ def make_tools(db_path: str):
 # ─────────────────────────────────────────────
 
 class AgentChain:
-    """
-    LangGraph ReAct agent for complex multi-table queries.
+    """LangGraph ReAct agent for complex multi-table queries."""
 
-    Improvements over Phase 2 original:
-      - Exponential backoff retry on rate limit (429) errors
-      - Cleaner SQL extraction from agent messages
-      - Better final answer extraction logic
-      - Explicit retry logging so user knows what is happening
-    """
-
-    def __init__(self, llm: ChatOpenAI, schema: str, db_path: str = DB_PATH):
+    def __init__(self, llm, schema: str, db_path: str, guard):
         self.llm     = llm
         self.schema  = schema
         self.db_path = db_path
-
-        tools        = make_tools(db_path)
-        self._agent  = create_react_agent(
-            llm,
-            tools,
-            prompt = AGENT_SYSTEM_PROMPT,
-        )
-        self._format = FORMAT_PROMPT | llm | StrOutputParser()
-
-    # ─────────────────────────────────────────
-    # PUBLIC
-    # ─────────────────────────────────────────
+        self.guard   = guard
 
     def run(self, question: str, result: QueryResult) -> QueryResult:
-        """
-        Run ReAct agent with automatic rate limit retry.
-        Retries up to MAX_RETRIES times with exponential backoff.
-        Updates and returns the QueryResult.
-        """
+        """Run the agent, retrying only on rate-limit errors (capped backoff)."""
         logger.info("[AgentChain] Running ReAct agent...")
+        result.strategy = STRATEGY
 
-        last_error = None
-
-        for attempt in range(1, MAX_RETRIES + 1):
-
+        for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
-                result = self._run_once(question, result)
-                if attempt > 1:
-                    logger.info(
-                        f"[AgentChain] Succeeded on retry {attempt}"
-                    )
-                return result
-
+                return self._run_once(question, result)
             except Exception as e:
-                last_error = e
+                result.error = str(e)
+                if is_infra_error(result.error) and attempt < MAX_ATTEMPTS:
+                    wait_s = min(_extract_retry_wait(e) * attempt, MAX_WAIT_S)
+                    logger.warning(
+                        f"[AgentChain] Rate limit (attempt {attempt}/{MAX_ATTEMPTS}) "
+                        f"— waiting {wait_s}s"
+                    )
+                    time.sleep(wait_s)
+                    continue
+                logger.error(f"[AgentChain] Failed: {e}")
+                break
 
-                if _is_rate_limit_error(e):
-                    if attempt < MAX_RETRIES:
-                        # Exponential backoff
-                        wait_s = _extract_retry_wait(e) * attempt
-                        logger.warning(
-                            f"[AgentChain] Rate limit hit "
-                            f"(attempt {attempt}/{MAX_RETRIES}) — "
-                            f"waiting {wait_s}s before retry..."
-                        )
-                        time.sleep(wait_s)
-                        continue
-                    else:
-                        logger.error(
-                            f"[AgentChain] Rate limit — "
-                            f"all {MAX_RETRIES} retries exhausted"
-                        )
-                        break
-                else:
-                    # Non-rate-limit error — no point retrying
-                    logger.error(f"[AgentChain] Failed: {e}")
-                    break
-
-        result.error = str(last_error)
+        result.execution_success = False
         return result
-
-    # ─────────────────────────────────────────
-    # PRIVATE — SINGLE ATTEMPT
-    # ─────────────────────────────────────────
 
     def _run_once(self, question: str, result: QueryResult) -> QueryResult:
-        """
-        Run a single agent attempt.
-        Raises exception on any failure (caller handles retry).
-        """
-        events = self._agent.stream(
-            {"messages": [("user", question)]},
-            stream_mode = "values",
+        executed = []
+        tools = make_tools(
+            self.db_path, self.guard,
+            question = result.original_question,
+            language = result.detected_language,
+            executed = executed,
         )
+        agent = create_react_agent(self.llm, tools, prompt=AGENT_SYSTEM_PROMPT)
 
-        all_messages = []
-        final_sql    = ""
+        state = agent.invoke(
+            {"messages": [("user", question)]},
+            config={"recursion_limit": AGENT_RECURSION_LIMIT},
+        )
+        answer     = _final_answer(state["messages"])
+        successful = [q for q in executed if q["ok"]]
 
-        for event in events:
-            msg = event["messages"][-1]
-            all_messages.append(msg)
+        result.agent_queries = [q["sql"] for q in executed]
+        if successful:
+            last = successful[-1]
+            result.generated_sql = last["sql"]
+            result.row_count     = last["row_count"]
+            result.sql_valid     = True
+        elif executed:
+            result.generated_sql = executed[-1]["sql"]
 
-            # Capture any SQL generated by the agent
-            content = str(getattr(msg, "content", ""))
-            if "SELECT" in content.upper():
-                sql_match = re.search(
-                    r"SELECT\s+.+?(?:;|$)",
-                    content,
-                    re.IGNORECASE | re.DOTALL
-                )
-                if sql_match:
-                    candidate = sql_match.group(0).strip().rstrip(";")
-                    # Keep the longest SQL found (most complete query)
-                    if len(candidate) > len(final_sql):
-                        final_sql = candidate
+        if executed and all(q["blocked"] for q in executed):
+            result.blocked      = True
+            result.block_reason = executed[-1]["error"]
 
-        # Extract final answer — last substantive AI message
-        final_answer = self._extract_final_answer(all_messages)
+        result.execution_success = bool(successful) and bool(answer)
+        result.raw_result        = answer
+        result.natural_response  = answer if result.execution_success else ""
 
-        result.generated_sql     = final_sql or "Multi-step agent query"
-        result.sql_valid         = True
-        result.execution_success = True
-        result.raw_result        = final_answer
+        if result.execution_success:
+            result.error = None
+            logger.info(
+                f"[AgentChain] Success — {len(executed)} queries, "
+                f"{len(successful)} succeeded"
+            )
+        else:
+            result.error = (
+                executed[-1]["error"] if executed
+                else "Agent finished without running a successful query"
+            ) or "Agent finished without a final answer"
+            logger.warning(f"[AgentChain] No successful query: {result.error}")
 
-        # Format into clean natural language response
-        result.natural_response = self._format.invoke({
-            "question": question,
-            "findings": final_answer,
-        }).strip()
-
-        logger.info("[AgentChain] Success")
         return result
-
-    def _extract_final_answer(self, messages: list) -> str:
-        """
-        Extract the final answer from the agent's message list.
-
-        Looks for the last AI message that:
-          - Has non-empty content
-          - Is not a tool call request
-          - Is longer than 20 characters (not a one-word ack)
-        """
-        for msg in reversed(messages):
-            content = str(getattr(msg, "content", ""))
-
-            # Skip empty messages
-            if not content or len(content) < 20:
-                continue
-
-            # Skip tool call messages
-            msg_type = type(msg).__name__.lower()
-            if "tool" in msg_type:
-                continue
-
-            # Skip messages that are pure tool invocations
-            if "tool_call" in content.lower():
-                continue
-
-            return content
-
-        return "Agent completed analysis — see query results above."

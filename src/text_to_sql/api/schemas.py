@@ -7,7 +7,7 @@ FastAPI uses these for automatic validation and OpenAPI docs.
 """
 
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional
+from typing import Literal, Optional
 
 
 # ─────────────────────────────────────────────
@@ -26,7 +26,7 @@ class QueryRequest(BaseModel):
             "كم عدد العملاء في قاعدة البيانات؟",
         ],
     )
-    language: Optional[str] = Field(
+    language: Optional[Literal["en", "ar"]] = Field(
         default = None,
         description = "Force language: 'en' or 'ar'. Auto-detected if not set.",
     )
@@ -67,13 +67,16 @@ class QueryResponse(BaseModel):
     """Response from /query endpoint."""
     question:         str
     detected_language: str           = Field(description="'en' or 'ar'")
-    complexity:       str            = Field(description="simple / medium / complex")
-    generated_sql:    str
+    complexity:       str            = Field(description="Router decision: simple / medium / complex")
+    strategy:         str            = Field(default="", description="Strategy that ran first: simple / cot / agent")
+    generated_sql:    str            = Field(description="The SQL that was executed (row limit applied)")
     natural_response: str
-    execution_success: bool
+    execution_success: bool          = Field(description="SQL ran and an answer was produced (not a correctness check)")
+    row_count:        int            = 0
     blocked:          bool           = Field(description="True if query was blocked by safety layer")
     block_reason:     str            = ""
-    retries_used:     int            = 0
+    fallback_used:    bool           = False
+    retries_used:     int            = Field(default=0, description="LLM attempts made by the self-correction fallback")
 
     model_config = {
         "json_schema_extra": {
@@ -81,11 +84,14 @@ class QueryResponse(BaseModel):
                 "question":          "How many customers are in the database?",
                 "detected_language": "en",
                 "complexity":        "simple",
+                "strategy":          "simple",
                 "generated_sql":     "SELECT COUNT(*) FROM customers LIMIT 500",
                 "natural_response":  "There are 175 customers in the database.",
                 "execution_success": True,
+                "row_count":         1,
                 "blocked":           False,
                 "block_reason":      "",
+                "fallback_used":     False,
                 "retries_used":      0,
             }]
         }
