@@ -16,8 +16,10 @@ Configurations:
 Cost note: 5 configs × 100 questions ≈ 500 pipeline runs with
 gpt-4o-mini. Use --sample to try it on a subset first.
 
+Note: --sample takes the FIRST N questions, and the first 40 are all
+simple. Use the full set (no --sample) for a meaningful comparison.
+
 Run:
-    python scripts/run_ablation.py --sample 20
     python scripts/run_ablation.py
 """
 
@@ -41,6 +43,13 @@ CONFIGS = [
 ]
 
 
+def _tier(bc: dict, tier: str) -> str:
+    """Accuracy for one tier, or '—' if the sample has no questions of that tier."""
+    if tier not in bc:
+        return "—"
+    return f"{bc[tier]['accuracy']:.0%} (n={bc[tier]['total']})"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run ablation study")
     parser.add_argument("--sample", type=int, default=None)
@@ -61,9 +70,7 @@ def main():
         ci = ov["execution_accuracy_ci95"]
         rows.append(
             f"| {tag} | {ov['execution_accuracy']:.1%} ({ci[0]:.0%}–{ci[1]:.0%}) "
-            f"| {bc.get('simple', {}).get('accuracy', 0):.0%} "
-            f"| {bc.get('medium', {}).get('accuracy', 0):.0%} "
-            f"| {bc.get('complex', {}).get('accuracy', 0):.0%} "
+            f"| {_tier(bc, 'simple')} | {_tier(bc, 'medium')} | {_tier(bc, 'complex')} "
             f"| {lat['p50_ms'] / 1000:.1f}s | {lat['mean_ms_excl_infra'] / 1000:.1f}s "
             f"| {ov['infra_errors']} |"
         )

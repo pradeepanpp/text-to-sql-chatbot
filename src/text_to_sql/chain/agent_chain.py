@@ -18,7 +18,7 @@ Bookkeeping (what makes the result trustworthy):
   - execution_success is True only if at least one query succeeded and
     the agent produced a final answer.
   - The loop is capped (AGENT_RECURSION_LIMIT) so a confused agent
-    cannot spin forever.
+    cannot spin forever. Hitting the cap counts as a failure, not an answer.
 
 LLM calls: one per reasoning step (typically 3–8).
 """
@@ -37,7 +37,7 @@ from src.text_to_sql.utils.logger import logger
 STRATEGY = "agent"
 
 # ── Loop and retry limits ─────────────────────
-AGENT_RECURSION_LIMIT = 16   # graph steps; one tool round = 2 steps → ~7 tool calls
+AGENT_RECURSION_LIMIT = 24   # graph steps; one tool round = 2 steps → ~11 tool calls
 MAX_ATTEMPTS          = 2    # whole-agent attempts on rate limit (429)
 MAX_WAIT_S            = 30   # cap on backoff so an API request never hangs for minutes
 ROWS_SHOWN_TO_AGENT   = 20
@@ -237,6 +237,9 @@ class AgentChain:
             config={"recursion_limit": AGENT_RECURSION_LIMIT},
         )
         answer     = _final_answer(state["messages"])
+        # LangGraph returns this text when the step limit is hit — not a real answer
+        if answer.startswith("Sorry, need more steps"):
+            answer = ""
         successful = [q for q in executed if q["ok"]]
 
         result.agent_queries = [q["sql"] for q in executed]
