@@ -1,4 +1,3 @@
-# scripts/run_ablation.py
 """
 Reproducible ablation study.
 
@@ -7,13 +6,13 @@ to data/eval/ablation.md. Every number in the README's ablation table
 should come from this script.
 
 Configurations:
-    simple_only    every question → Simple Chain, no fallback
-    cot_only       every question → CoT Chain, no fallback
-    agent_only     every question → ReAct agent, no fallback
+    simple_only    every question -> simple chain, no fallback
+    cot_only       every question -> chain-of-thought, no fallback
+    agent_only     every question -> ReAct agent, no fallback
     router         router picks the strategy, no fallback
     full_system    router + self-correction fallback (production setting)
 
-Cost note: 5 configs × 100 questions ≈ 500 pipeline runs with
+Cost note: 5 configs x 100 questions ≈ 500 pipeline runs with
 gpt-4o-mini. Use --sample to try it on a subset first.
 
 Note: --sample takes the FIRST N questions, and the first 40 are all
@@ -89,7 +88,7 @@ def main():
     with open(path, "w", encoding="utf-8") as f:
         f.write(table + "\n")
     print(table)
-    logger.info(f"Ablation table saved → {path}")
+    logger.info(f"Ablation table saved to {path}")
 
 
 if __name__ == "__main__":

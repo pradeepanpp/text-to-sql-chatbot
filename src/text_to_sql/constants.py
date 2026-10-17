@@ -1,15 +1,12 @@
-# src/text_to_sql/constants.py
-"""
-Project-wide constants.
-"""
+"""Project-wide constants."""
 
-# ── Table names ──────────────────────────────
-TABLE_CUSTOMERS   = "customers"
-TABLE_PRODUCTS    = "products"
-TABLE_REGIONS     = "regions"
+# Table names
+TABLE_CUSTOMERS = "customers"
+TABLE_PRODUCTS = "products"
+TABLE_REGIONS = "regions"
 TABLE_STATE_REGIONS = "state_regions"
-TABLE_BUDGETS     = "budgets"
-TABLE_SALES       = "sales_orders"
+TABLE_BUDGETS = "budgets"
+TABLE_SALES = "sales_orders"
 
 ALL_TABLES = [
     TABLE_CUSTOMERS,
@@ -20,7 +17,7 @@ ALL_TABLES = [
     TABLE_SALES,
 ]
 
-# ── Table descriptions for LLM context ───────
+# Table descriptions for LLM context
 TABLE_DESCRIPTIONS = {
     TABLE_CUSTOMERS: (
         "Contains customer information. "
@@ -56,14 +53,14 @@ TABLE_DESCRIPTIONS = {
     ),
 }
 
-# ── Query complexity tiers ────────────────────
-COMPLEXITY_SIMPLE  = "simple"    # single table, no joins
-COMPLEXITY_MEDIUM  = "medium"    # 2 tables, simple join or group by
-COMPLEXITY_COMPLEX = "complex"   # 3+ tables, subqueries, aggregations
+# Query complexity tiers
+COMPLEXITY_SIMPLE = "simple"    # single table, no joins
+COMPLEXITY_MEDIUM = "medium"    # 2 tables, simple join or group by
+COMPLEXITY_COMPLEX = "complex"  # 3+ tables, subqueries, aggregations
 
-# ── Self-correction ───────────────────────────
+# Self-correction
 MAX_SQL_RETRIES = 3
 
-# ── Response language ─────────────────────────
+# Response language
 LANG_ENGLISH = "en"
-LANG_ARABIC  = "ar"
+LANG_ARABIC = "ar"

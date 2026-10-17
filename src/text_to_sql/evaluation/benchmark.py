@@ -1,20 +1,14 @@
-# src/text_to_sql/evaluation/benchmark.py
 """
-Benchmark runner.
+Benchmark runner. Runs the evaluation questions through the pipeline and reports:
 
-Runs the evaluation questions through the pipeline and measures:
-
-  execution_accuracy        — generated SQL returns the same rows as the
-                              reference SQL (strict; see metrics.py)
-  execution_accuracy_lenient— same, but extra columns are allowed
-  execution_success_rate    — SQL ran and an answer was produced
-                              (NOT a correctness metric; reported so it is
-                              never confused with accuracy)
-  infra_errors              — rate limits / API errors, reported apart
-                              from model mistakes
-  router agreement          — router decision vs the dataset's tier label
-  latency                   — mean / p50 / p95, with and without infra errors
-  95% Wilson confidence intervals on every accuracy
+  execution_accuracy          generated SQL returns the same rows as the reference SQL
+                              (strict; see metrics.py), with a 95% Wilson interval
+  execution_accuracy_lenient  same, but extra columns are allowed
+  execution_success_rate      SQL ran and an answer was written. Not a correctness
+                              metric; reported so it is never confused with accuracy
+  infra_errors                rate limits and API errors, kept apart from model mistakes
+  router agreement            router decision vs the dataset label
+  latency                     mean / p50 / p95, with and without infra errors
 
 Each question gets an `outcome`:
   correct | correct_extra_columns | wrong_result | sql_error |
@@ -25,12 +19,8 @@ last successful query is compared with the reference, so for multi-step
 questions agent accuracy is a lower bound. Those rows are flagged with
 agent_multi_query=True for manual review.
 
-Outputs:
-  data/eval/benchmark_results[_<tag>].json   ← full results
-  data/eval/benchmark_summary[_<tag>].txt    ← readable summary
-
-Run:
-    python scripts/run_benchmark.py
+Outputs data/eval/benchmark_results[_<tag>].json and benchmark_summary[_<tag>].txt.
+Run: python scripts/run_benchmark.py
 """
 
 import os
@@ -53,7 +43,7 @@ from src.text_to_sql.evaluation.metrics import results_match, wilson_interval
 from src.text_to_sql.utils.logger import logger
 
 RESULTS_DIR = "data/eval"
-DB_PATH     = os.getenv("DB_PATH", "database/sales.db")
+DB_PATH = os.getenv("DB_PATH", "database/sales.db")
 
 CORRECT_OUTCOMES = {"correct"}
 LENIENT_OUTCOMES = {"correct", "correct_extra_columns"}
@@ -67,9 +57,6 @@ def _paths(tag: str = "") -> tuple:
     )
 
 
-# ─────────────────────────────────────────────
-# EXECUTION HELPERS
-# ─────────────────────────────────────────────
 
 def run_sql(sql: str, db_path: str = DB_PATH, row_limit: int = 500) -> tuple:
     """Execute SQL read-only with the same row limit as production. Returns (ok, rows, error)."""
@@ -114,20 +101,17 @@ def classify_outcome(result, ref_ok: bool, ref_rows: list,
     return "wrong_result", True
 
 
-# ─────────────────────────────────────────────
-# BENCHMARK RUNNER
-# ─────────────────────────────────────────────
 
 def run_benchmark(
-    sample_size:       int   = None,
-    complexity_filter: str   = None,
-    language_filter:   str   = None,
-    strategy:          str   = None,
-    allow_fallback:    bool  = True,
-    delay_s:           float = 0.0,
-    tag:               str   = "",
-    chain                    = None,
-    db_path:           str   = DB_PATH,
+    sample_size: int = None,
+    complexity_filter: str = None,
+    language_filter: str = None,
+    strategy: str = None,
+    allow_fallback: bool = True,
+    delay_s: float = 0.0,
+    tag: str = "",
+    chain=None,
+    db_path: str = DB_PATH,
 ) -> dict:
     """
     Run the evaluation benchmark.
@@ -164,7 +148,7 @@ def run_benchmark(
         chain = TextToSQLChain(db_path=db_path)
     row_limit = chain.guard.row_limit
 
-    results     = []
+    results = []
     total_start = time.perf_counter()
 
     for i, item in enumerate(dataset, 1):
@@ -179,43 +163,43 @@ def run_benchmark(
         outcome, _ = classify_outcome(result, ref_ok, ref_rows, db_path, row_limit)
 
         results.append({
-            "index":                i,
-            "question":             question,
-            "complexity":           item["complexity"],
-            "router_complexity":    result.complexity,
-            "strategy":             result.strategy,
-            "language":             item["language"],
-            "tables":               item["tables"],
-            "reference_sql":        item["reference_sql"],
-            "reference_valid":      ref_ok,
-            "reference_error":      ref_err,
-            "generated_sql":        result.generated_sql,
-            "agent_queries":        result.agent_queries,
-            "agent_multi_query":    len(result.agent_queries) > 1,
-            "outcome":              outcome,
-            "execution_success":    result.execution_success,
+            "index": i,
+            "question": question,
+            "complexity": item["complexity"],
+            "router_complexity": result.complexity,
+            "strategy": result.strategy,
+            "language": item["language"],
+            "tables": item["tables"],
+            "reference_sql": item["reference_sql"],
+            "reference_valid": ref_ok,
+            "reference_error": ref_err,
+            "generated_sql": result.generated_sql,
+            "agent_queries": result.agent_queries,
+            "agent_multi_query": len(result.agent_queries) > 1,
+            "outcome": outcome,
+            "execution_success": result.execution_success,
             "has_data_in_response": answer_contains_data(result.natural_response),
-            "fallback_used":        result.fallback_used,
-            "retries_used":         result.retries_used,
-            "blocked":              result.blocked,
-            "detected_language":    result.detected_language,
-            "natural_response":     result.natural_response,
-            "error":                result.error,
-            "latency_ms":           latency_ms,
+            "fallback_used": result.fallback_used,
+            "retries_used": result.retries_used,
+            "blocked": result.blocked,
+            "detected_language": result.detected_language,
+            "natural_response": result.natural_response,
+            "error": result.error,
+            "latency_ms": latency_ms,
         })
 
-        logger.info(f"  → {outcome} | {latency_ms:.0f}ms | strategy={result.strategy}")
+        logger.info(f"  {outcome} | {latency_ms:.0f}ms | strategy={result.strategy}")
         if delay_s:
             time.sleep(delay_s)
 
     total_time = round(time.perf_counter() - total_start, 1)
-    report     = compute_metrics(results, total_time)
+    report = compute_metrics(results, total_time)
     report["meta"].update({
-        "timestamp":      datetime.now(timezone.utc).isoformat(),
-        "strategy":       strategy or "router",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "strategy": strategy or "router",
         "allow_fallback": allow_fallback,
-        "model":          getattr(chain.llm, "model_name", type(chain.llm).__name__),
-        "row_limit":      row_limit,
+        "model": getattr(chain.llm, "model_name", type(chain.llm).__name__),
+        "row_limit": row_limit,
     })
 
     results_json, summary_txt = _paths(tag)
@@ -223,32 +207,28 @@ def run_benchmark(
         json.dump(report, f, indent=2, ensure_ascii=False)
     with open(summary_txt, "w", encoding="utf-8") as f:
         f.write(format_summary(report))
-    logger.info(f"Results saved → {results_json}")
-    logger.info(f"Summary saved → {summary_txt}")
+    logger.info(f"Results saved to {results_json} and {summary_txt}")
 
     return report
 
 
-# ─────────────────────────────────────────────
-# METRICS
-# ─────────────────────────────────────────────
 
 def _group_metrics(rows: list) -> dict:
-    n        = len(rows)
-    correct  = sum(1 for r in rows if r["outcome"] in CORRECT_OUTCOMES)
-    lenient  = sum(1 for r in rows if r["outcome"] in LENIENT_OUTCOMES)
-    success  = sum(1 for r in rows if r["execution_success"])
-    infra    = sum(1 for r in rows if r["outcome"] == "infra_error")
-    lat      = [r["latency_ms"] for r in rows]
+    n = len(rows)
+    correct = sum(1 for r in rows if r["outcome"] in CORRECT_OUTCOMES)
+    lenient = sum(1 for r in rows if r["outcome"] in LENIENT_OUTCOMES)
+    success = sum(1 for r in rows if r["execution_success"])
+    infra = sum(1 for r in rows if r["outcome"] == "infra_error")
+    lat = [r["latency_ms"] for r in rows]
     return {
-        "total":                  n,
-        "correct":                correct,
-        "accuracy":               round(correct / n, 4) if n else 0.0,
-        "accuracy_ci95":          wilson_interval(correct, n),
-        "accuracy_lenient":       round(lenient / n, 4) if n else 0.0,
+        "total": n,
+        "correct": correct,
+        "accuracy": round(correct / n, 4) if n else 0.0,
+        "accuracy_ci95": wilson_interval(correct, n),
+        "accuracy_lenient": round(lenient / n, 4) if n else 0.0,
         "execution_success_rate": round(success / n, 4) if n else 0.0,
-        "infra_errors":           infra,
-        "avg_latency_ms":         round(sum(lat) / n, 1) if n else 0.0,
+        "infra_errors": infra,
+        "avg_latency_ms": round(sum(lat) / n, 1) if n else 0.0,
     }
 
 
@@ -259,9 +239,9 @@ def compute_metrics(results: list, total_time: float) -> dict:
         return {}
 
     outcomes = Counter(r["outcome"] for r in results)
-    correct  = outcomes["correct"]
-    lenient  = correct + outcomes["correct_extra_columns"]
-    infra    = outcomes["infra_error"]
+    correct = outcomes["correct"]
+    lenient = correct + outcomes["correct_extra_columns"]
+    infra = outcomes["infra_error"]
     non_infra_total = total - infra
 
     by_complexity = {
@@ -284,20 +264,20 @@ def compute_metrics(results: list, total_time: float) -> dict:
         confusion[r["complexity"]][r["router_complexity"]] += 1
     router_agree = sum(1 for r in results if r["complexity"] == r["router_complexity"])
 
-    fallback_used    = sum(1 for r in results if r["fallback_used"])
+    fallback_used = sum(1 for r in results if r["fallback_used"])
     fallback_rescued = sum(
         1 for r in results if r["fallback_used"] and r["execution_success"]
     )
 
     latencies = sorted(r["latency_ms"] for r in results)
-    lat_ok    = [r["latency_ms"] for r in results if r["outcome"] != "infra_error"]
-    n         = len(latencies)
+    lat_ok = [r["latency_ms"] for r in results if r["outcome"] != "infra_error"]
+    n = len(latencies)
 
     return {
         "meta": {
             "total_questions": total,
-            "total_time_sec":  total_time,
-            "avg_time_per_q":  round(total_time / total, 1),
+            "total_time_sec": total_time,
+            "avg_time_per_q": round(total_time / total, 1),
             "metric": (
                 "execution_accuracy = generated SQL returns the same rows as "
                 "the reference SQL (row/column order ignored, numbers rounded "
@@ -305,9 +285,9 @@ def compute_metrics(results: list, total_time: float) -> dict:
             ),
         },
         "overall": {
-            "execution_accuracy":           round(correct / total, 4),
-            "execution_accuracy_ci95":      wilson_interval(correct, total),
-            "execution_accuracy_lenient":   round(lenient / total, 4),
+            "execution_accuracy": round(correct / total, 4),
+            "execution_accuracy_ci95": wilson_interval(correct, total),
+            "execution_accuracy_lenient": round(lenient / total, 4),
             "execution_accuracy_excl_infra": (
                 round(correct / non_infra_total, 4) if non_infra_total else 0.0
             ),
@@ -317,29 +297,29 @@ def compute_metrics(results: list, total_time: float) -> dict:
             "data_response_rate": round(
                 sum(1 for r in results if r["has_data_in_response"]) / total, 4
             ),
-            "infra_errors":      infra,
-            "blocked":           outcomes["blocked"],
-            "reference_errors":  sum(1 for r in results if not r["reference_valid"]),
-            "fallback_used":     fallback_used,
-            "fallback_rescued":  fallback_rescued,
-            "total_retries":     sum(r["retries_used"] for r in results),
-            "retry_rate":        round(fallback_used / total, 4),
+            "infra_errors": infra,
+            "blocked": outcomes["blocked"],
+            "reference_errors": sum(1 for r in results if not r["reference_valid"]),
+            "fallback_used": fallback_used,
+            "fallback_rescued": fallback_rescued,
+            "total_retries": sum(r["retries_used"] for r in results),
+            "retry_rate": round(fallback_used / total, 4),
         },
-        "outcomes":      dict(outcomes),
+        "outcomes": dict(outcomes),
         "by_complexity": by_complexity,
-        "by_language":   by_language,
-        "by_strategy":   {k: _group_metrics(v) for k, v in sorted(by_strategy.items())},
+        "by_language": by_language,
+        "by_strategy": {k: _group_metrics(v) for k, v in sorted(by_strategy.items())},
         "router": {
             "agreement_with_labels": round(router_agree / total, 4),
             "confusion": {label: dict(c) for label, c in confusion.items()},
         },
         "latency": {
-            "mean_ms":             round(sum(latencies) / n, 1),
-            "p50_ms":              latencies[n // 2],
-            "p95_ms":              latencies[min(n - 1, int(n * 0.95))],
-            "min_ms":              latencies[0],
-            "max_ms":              latencies[-1],
-            "mean_ms_excl_infra":  round(sum(lat_ok) / len(lat_ok), 1) if lat_ok else 0.0,
+            "mean_ms": round(sum(latencies) / n, 1),
+            "p50_ms": latencies[n // 2],
+            "p95_ms": latencies[min(n - 1, int(n * 0.95))],
+            "min_ms": latencies[0],
+            "max_ms": latencies[-1],
+            "mean_ms_excl_infra": round(sum(lat_ok) / len(lat_ok), 1) if lat_ok else 0.0,
         },
         "detailed_results": results,
     }
@@ -408,7 +388,3 @@ def format_summary(report: dict) -> str:
     ]
     return "\n".join(lines)
 
-
-# Backwards-compatible names
-_compute_metrics = compute_metrics
-_format_summary  = format_summary

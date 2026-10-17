@@ -1,488 +1,238 @@
-# src/text_to_sql/dashboard/app.py
 """
-Streamlit Dashboard — Phase 6.
+Streamlit dashboard. Talks to the API (API_BASE, default http://localhost:8000).
 
-Bilingual Arabic-English Text-to-SQL Dashboard.
-Connects to the FastAPI backend at localhost:8000.
-
-Run (API must be running first):
+Run (start the API first):
     streamlit run src/text_to_sql/dashboard/app.py
-
-Tabs:
-    QUERY    — interactive query interface
-    BATCH    — multi-question analysis
-    HISTORY  — session query log
-    SCHEMA   — database schema browser
-    ABOUT    — system info
 """
 
 import os
 import sys
+
 sys.path.append(".")
 
 import requests
 import streamlit as st
 
 from src.text_to_sql.dashboard.components import (
-    inject_css,
-    render_header,
-    render_result,
-    render_history,
-    render_schema,
-    render_sidebar,
-    EXAMPLE_PROMPTS,
+    EXAMPLE_PROMPTS, esc, inject_css, render_header, render_history, render_result,
+    render_schema, render_sidebar, section_label,
 )
 
 API_BASE = os.getenv("API_BASE", "http://localhost:8000")
+MAX_BATCH = 20
+NO_EXAMPLE = "— select —"
+EMPTY_STATS = {"total": 0, "success": 0, "blocked": 0}
 
-# ─────────────────────────────────────────────
-# PAGE CONFIG
-# ─────────────────────────────────────────────
+DEFAULT_BATCH = "\n".join([
+    "How many customers are in the database?",
+    "كم عدد المنتجات في قاعدة البيانات؟",
+    "What are the top 5 customers by total sales?",
+    "Show total sales broken down by channel",
+    "What is the total 2017 budget across all products?",
+])
 
-st.set_page_config(
-    page_title  = "Text-to-SQL",
-    page_icon   = "◈",
-    layout      = "wide",
-    initial_sidebar_state = "expanded",
-)
+LAYERS = [
+    ("simple", "ROUTER", "Keyword rules choose simple / medium / complex. No LLM call."),
+    ("simple", "SIMPLE CHAIN", "One call writes the SQL, one writes the answer. Single-table lookups."),
+    ("medium", "CHAIN-OF-THOUGHT", "Plans the joins and grouping before writing SQL. Joins, GROUP BY, rankings."),
+    ("complex", "REACT AGENT", "LangGraph agent with 4 tools (list_tables, get_schema, run_query, check_query)."),
+    ("guard", "SQL GUARD", "Injection check on the question and its translation. SELECT only, read-only "
+                           "connection, row limit, timeout. Every execution audited to JSONL."),
+]
 
+ENDPOINTS = [
+    ("POST", "/query", "Single question"),
+    ("POST", "/query/batch", "Batch (max 20)"),
+    ("GET", "/schema", "Database schema"),
+    ("GET", "/health", "System health"),
+    ("GET", "/audit/stats", "Audit log stats"),
+    ("GET", "/docs", "Swagger UI"),
+]
 
-# ─────────────────────────────────────────────
-# SESSION STATE
-# ─────────────────────────────────────────────
+st.set_page_config(page_title="Text-to-SQL", page_icon="◈", layout="wide", initial_sidebar_state="expanded")
 
-def init_state():
-    defaults = {
-        "history":     [],
-        "last_result": None,
-        "api_status":  None,
-        "schema_data": None,
-        "stats":       {"total": 0, "success": 0, "blocked": 0},
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-
-# ─────────────────────────────────────────────
-# API HELPERS
-# ─────────────────────────────────────────────
 
 @st.cache_data(ttl=15)
 def fetch_health() -> dict | None:
     try:
         r = requests.get(f"{API_BASE}/health", timeout=2)
-        # 503 = API is up but degraded; its body still lists component status
-        return r.json() if r.status_code in (200, 503) else None
+        return r.json() if r.status_code in (200, 503) else None  # 503 = degraded, body still useful
     except Exception:
         return None
 
 
 @st.cache_data(ttl=300)
-def fetch_benchmark() -> dict | None:
+def fetch_json(path: str) -> dict | None:
     try:
-        r = requests.get(f"{API_BASE}/benchmark", timeout=5)
+        r = requests.get(f"{API_BASE}{path}", timeout=5)
         return r.json() if r.status_code == 200 else None
     except Exception:
         return None
 
 
-@st.cache_data(ttl=300)
-def fetch_schema() -> dict | None:
+def post(path: str, body: dict, timeout: int) -> dict | None:
     try:
-        r = requests.get(f"{API_BASE}/schema", timeout=5)
-        return r.json() if r.status_code == 200 else None
-    except Exception:
-        return None
-
-
-def call_query(question: str) -> dict | None:
-    try:
-        r = requests.post(
-            f"{API_BASE}/query",
-            json    = {"question": question},
-            timeout = 120,
-        )
-        if r.status_code == 200:
-            return r.json()
-        st.error(f"API error {r.status_code}: {r.text[:200]}")
-        return None
+        r = requests.post(f"{API_BASE}{path}", json=body, timeout=timeout)
     except requests.ConnectionError:
-        st.error("❌ Cannot connect to API. Run: `uvicorn src.text_to_sql.api.main:app --port 8000`")
+        st.error("Cannot connect to the API. Run: `uvicorn src.text_to_sql.api.main:app --port 8000`")
         return None
     except requests.Timeout:
-        st.error("⏱ Request timed out — complex queries can take up to 60 seconds.")
+        st.error("Request timed out. Complex questions can take up to a minute.")
         return None
     except Exception as e:
         st.error(f"Request failed: {e}")
         return None
-
-
-def call_batch(questions: list) -> dict | None:
-    try:
-        r = requests.post(
-            f"{API_BASE}/query/batch",
-            json    = {"questions": questions},
-            timeout = 300,
-        )
-        if r.status_code == 200:
-            return r.json()
+    if r.status_code != 200:
         st.error(f"API error {r.status_code}: {r.text[:200]}")
         return None
-    except requests.ConnectionError:
-        st.error("❌ Cannot connect to API.")
-        return None
-    except Exception as e:
-        st.error(f"Request failed: {e}")
-        return None
+    return r.json()
 
 
-def update_stats(result: dict):
-    st.session_state.stats["total"] += 1
-    if result.get("blocked"):
-        st.session_state.stats["blocked"] += 1
-    elif result.get("execution_success"):
-        st.session_state.stats["success"] += 1
-
-
-def add_to_history(result: dict):
+def record(result: dict):
+    """Add a result to the history and the session counters."""
     st.session_state.history.append(result)
+    stats = st.session_state.stats
+    stats["total"] += 1
+    if result.get("blocked"):
+        stats["blocked"] += 1
+    elif result.get("execution_success"):
+        stats["success"] += 1
 
 
-# ─────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────
-
-def main():
-    init_state()
-    inject_css()
-
-    # ── Sidebar ───────────────────────────────
+def sidebar():
     with st.sidebar:
-        st.markdown("<br>", unsafe_allow_html=True)
-        api_status = fetch_health()
-        st.session_state.api_status = api_status
-        render_sidebar(api_status, st.session_state.stats)
-
+        render_sidebar(fetch_health(), st.session_state.stats)
         st.markdown("---")
         if st.button("CLEAR SESSION"):
-            st.session_state.history     = []
+            st.session_state.history = []
             st.session_state.last_result = None
-            st.session_state.stats       = {"total": 0, "success": 0, "blocked": 0}
+            st.session_state.stats = dict(EMPTY_STATS)
             fetch_health.clear()
-            fetch_schema.clear()
+            fetch_json.clear()
             st.rerun()
 
-        st.markdown("""
-        <div style="
-            font-family:'IBM Plex Mono',monospace;
-            font-size:0.55rem;
-            letter-spacing:0.12em;
-            color:#1a2235;
-            text-align:center;
-            padding-top:8px;
-        ">TEXT-TO-SQL · v1.0</div>
-        """, unsafe_allow_html=True)
 
-    # ── Header ────────────────────────────────
+def query_tab():
+    left, right = st.columns([1, 1], gap="large")
+    with left:
+        section_label("Load example")
+        example = st.selectbox("example", [NO_EXAMPLE] + list(EXAMPLE_PROMPTS), label_visibility="collapsed")
+        section_label("Question (English or Arabic)")
+        question = st.text_area("question", value=EXAMPLE_PROMPTS.get(example, ""), height=120,
+                                placeholder="Ask in English or Arabic…", label_visibility="collapsed")
+        st.html(f'<div class="note">{len(question)}/2000</div>')
+        submit = st.button("EXECUTE →", use_container_width=True, disabled=not question.strip())
+
+    with right:
+        if submit and question.strip():
+            with st.spinner(""):
+                result = post("/query", {"question": question.strip()}, timeout=120)
+            if result:
+                st.session_state.last_result = result
+                record(result)
+                fetch_health.clear()
+
+        if st.session_state.last_result:
+            render_result(st.session_state.last_result)
+        else:
+            st.html('<div class="empty">AWAITING QUERY</div>')
+
+
+def batch_tab():
+    section_label(f"Batch input, one question per line (max {MAX_BATCH})")
+    text = st.text_area("batch_input", value=DEFAULT_BATCH, height=160, label_visibility="collapsed")
+    if not st.button("RUN BATCH →"):
+        return
+
+    questions = [line.strip() for line in text.split("\n") if line.strip()]
+    if not questions:
+        st.warning("Enter at least one question.")
+        return
+    if len(questions) > MAX_BATCH:
+        st.error(f"Maximum {MAX_BATCH} questions per batch.")
+        return
+
+    with st.spinner(f"Processing {len(questions)} questions…"):
+        batch = post("/query/batch", {"questions": questions}, timeout=300)
+    if not batch:
+        return
+
+    cols = st.columns(4)
+    cols[0].metric("TOTAL", batch["total"])
+    cols[1].metric("SUCCESS", batch["success_count"])
+    cols[2].metric("BLOCKED", batch["blocked_count"])
+    cols[3].metric("COMPLEX", batch.get("summary", {}).get("complex", 0))
+    for result in batch["results"]:
+        render_result(result, show_question=True)
+        record(result)
+
+
+def history_tab():
+    left, right = st.columns([4, 1])
+    with left:
+        section_label("Session query log (last 30)")
+    with right:
+        if st.button("CLEAR"):
+            st.session_state.history = []
+            st.session_state.stats = dict(EMPTY_STATS)
+            st.rerun()
+    render_history(st.session_state.history)
+
+
+def schema_tab():
+    schema = fetch_json("/schema")
+    if schema:
+        render_schema(schema)
+    else:
+        st.html('<div class="card offline">Could not load schema. Is the API running?</div>')
+
+
+def about_tab():
+    left, right = st.columns([1, 1], gap="large")
+    with left:
+        section_label("Architecture")
+        st.html("".join(f'<div class="card layer {tier}"><div class="layer-title">{title}</div>'
+                        f'<div class="layer-text">{text}</div></div>' for tier, title, text in LAYERS))
+
+    with right:
+        # Numbers come from the latest benchmark run through the API, nothing is hard-coded
+        section_label("Benchmark results")
+        rows = []
+        bench = fetch_json("/benchmark")
+        if bench:
+            overall = bench.get("overall", {})
+            accuracy = f"{overall.get('execution_accuracy', 0):.1%}"
+            ci = overall.get("execution_accuracy_ci95")
+            if ci:
+                accuracy += f" (95% CI {ci[0]:.0%}–{ci[1]:.0%})"
+            rows.append(("Execution accuracy", accuracy, "ok"))
+            for tier, vals in bench.get("by_complexity", {}).items():
+                rows.append((f"{tier.title()} questions", f"{vals['accuracy']:.0%}", ""))
+            for lang, vals in bench.get("by_language", {}).items():
+                name = "English" if lang == "en" else "Arabic"
+                rows.append((f"{name} (n={vals['total']})", f"{vals['accuracy']:.0%}", ""))
+            rows.append(("Questions", str(bench.get("meta", {}).get("total_questions", "—")), "muted"))
+        else:
+            rows.append(("Benchmark", "not run yet (scripts/run_benchmark.py)", "warn"))
+        st.html("".join(f'<div class="kv"><span class="muted">{label}</span><span class="{css}">{esc(value)}</span></div>'
+                        for label, value, css in rows))
+
+        section_label("API endpoints")
+        st.html("".join(f'<div class="kv endpoint"><span class="method">{method}</span><span>{path}</span>'
+                        f'<span class="muted">{text}</span></div>' for method, path, text in ENDPOINTS))
+
+
+def main():
+    for key, default in [("history", []), ("last_result", None), ("stats", dict(EMPTY_STATS))]:
+        st.session_state.setdefault(key, default)
+    inject_css()
+    sidebar()
     render_header()
 
-    # ── Tabs ──────────────────────────────────
-    tab_query, tab_batch, tab_history, tab_schema, tab_about = st.tabs([
-        "QUERY", "BATCH", "HISTORY", "SCHEMA", "ABOUT"
-    ])
-
-    # ══════════════════════════════════════════
-    # TAB 1 — QUERY
-    # ══════════════════════════════════════════
-    with tab_query:
-        col_left, col_right = st.columns([1, 1], gap="large")
-
-        with col_left:
-            # Example selector
-            st.markdown("""
-            <div style="font-family:'IBM Plex Mono',monospace;font-size:0.6rem;
-                letter-spacing:0.18em;color:#3d5a80;margin-bottom:8px;">
-            ◈ LOAD EXAMPLE</div>
-            """, unsafe_allow_html=True)
-
-            example = st.selectbox(
-                label            = "example",
-                options          = ["— select —"] + list(EXAMPLE_PROMPTS.keys()),
-                label_visibility = "collapsed",
-            )
-
-            default_text = (
-                EXAMPLE_PROMPTS[example]
-                if example != "— select —"
-                else ""
-            )
-
-            st.markdown("""
-            <div style="font-family:'IBM Plex Mono',monospace;font-size:0.6rem;
-                letter-spacing:0.18em;color:#3d5a80;margin-top:16px;margin-bottom:8px;">
-            ◈ QUESTION  (English or Arabic)</div>
-            """, unsafe_allow_html=True)
-
-            question = st.text_area(
-                label            = "question",
-                value            = default_text,
-                height           = 120,
-                placeholder      = "Ask in English or Arabic…",
-                label_visibility = "collapsed",
-            )
-
-            char_count = len(question)
-            st.markdown(f"""
-            <div style="font-family:'IBM Plex Mono',monospace;font-size:0.58rem;
-                color:#1a2235;text-align:right;margin-top:-6px;margin-bottom:10px;">
-            {char_count}/2000</div>
-            """, unsafe_allow_html=True)
-
-            submit = st.button(
-                "EXECUTE →",
-                use_container_width = True,
-                disabled            = not question.strip(),
-            )
-
-        with col_right:
-            if submit and question.strip():
-                with st.spinner(""):
-                    result = call_query(question.strip())
-                if result:
-                    st.session_state.last_result = result
-                    update_stats(result)
-                    add_to_history(result)
-                    fetch_health.clear()
-
-            if st.session_state.last_result:
-                render_result(st.session_state.last_result)
-            else:
-                st.markdown("""
-                <div style="
-                    height:260px;
-                    display:flex;
-                    align-items:center;
-                    justify-content:center;
-                    border:1px dashed #1a2235;
-                    border-radius:3px;
-                ">
-                    <div style="text-align:center;">
-                        <div style="font-size:2rem;opacity:0.08;margin-bottom:10px;">◈</div>
-                        <div style="font-family:'IBM Plex Mono',monospace;
-                            font-size:0.65rem;color:#1a2235;letter-spacing:0.1em;">
-                        AWAITING QUERY</div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-    # ══════════════════════════════════════════
-    # TAB 2 — BATCH
-    # ══════════════════════════════════════════
-    with tab_batch:
-        st.markdown("""
-        <div style="font-family:'IBM Plex Mono',monospace;font-size:0.6rem;
-            letter-spacing:0.18em;color:#3d5a80;margin-bottom:8px;">
-        ◈ BATCH INPUT — one question per line (max 20)</div>
-        """, unsafe_allow_html=True)
-
-        default_batch = "\n".join([
-            "How many customers are in the database?",
-            "كم عدد المنتجات في قاعدة البيانات؟",
-            "What are the top 5 customers by total sales?",
-            "Show total sales broken down by channel",
-            "What is the total 2017 budget across all products?",
-        ])
-
-        batch_input = st.text_area(
-            label            = "batch_input",
-            value            = default_batch,
-            height           = 160,
-            label_visibility = "collapsed",
-        )
-
-        run_batch = st.button("RUN BATCH →")
-
-        if run_batch:
-            lines = [line.strip() for line in batch_input.split("\n") if line.strip()]
-            if not lines:
-                st.warning("Enter at least one question.")
-            elif len(lines) > 20:
-                st.error("Maximum 20 questions per batch.")
-            else:
-                with st.spinner(f"Processing {len(lines)} questions…"):
-                    batch_result = call_batch(lines)
-
-                if batch_result:
-                    # Summary row
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("TOTAL",   batch_result["total"])
-                    with col2:
-                        st.metric("SUCCESS", batch_result["success_count"])
-                    with col3:
-                        st.metric("BLOCKED", batch_result["blocked_count"])
-                    with col4:
-                        summary = batch_result.get("summary", {})
-                        complex_count = summary.get("complex", 0)
-                        st.metric("COMPLEX", complex_count)
-
-                    st.markdown("<br>", unsafe_allow_html=True)
-
-                    # Individual results
-                    for r in batch_result["results"]:
-                        render_result(r)
-                        # Add question label above each result
-                        add_to_history(r)
-                        update_stats(r)
-
-    # ══════════════════════════════════════════
-    # TAB 3 — HISTORY
-    # ══════════════════════════════════════════
-    with tab_history:
-        col_h1, col_h2 = st.columns([4, 1])
-        with col_h1:
-            st.markdown("""
-            <div style="font-family:'IBM Plex Mono',monospace;font-size:0.6rem;
-                letter-spacing:0.18em;color:#3d5a80;margin-bottom:12px;">
-            ◈ SESSION QUERY LOG (last 30)</div>
-            """, unsafe_allow_html=True)
-        with col_h2:
-            if st.button("CLEAR"):
-                st.session_state.history = []
-                st.session_state.stats   = {"total": 0, "success": 0, "blocked": 0}
-                st.rerun()
-
-        render_history(st.session_state.history)
-
-    # ══════════════════════════════════════════
-    # TAB 4 — SCHEMA
-    # ══════════════════════════════════════════
-    with tab_schema:
-        schema = fetch_schema()
-        if schema:
-            render_schema(schema)
-        else:
-            st.markdown("""
-            <div style="font-family:'IBM Plex Mono',monospace;font-size:0.72rem;
-                color:#c9a84c;padding:20px;">
-            Could not load schema — is the API running?</div>
-            """, unsafe_allow_html=True)
-
-    # ══════════════════════════════════════════
-    # TAB 5 — ABOUT
-    # ══════════════════════════════════════════
-    with tab_about:
-        col_a, col_b = st.columns([1, 1], gap="large")
-
-        with col_a:
-            st.markdown("""
-            <div style="font-family:'IBM Plex Mono',monospace;font-size:0.6rem;
-                letter-spacing:0.18em;color:#3d5a80;margin-bottom:12px;">
-            ◈ ARCHITECTURE</div>
-            """, unsafe_allow_html=True)
-
-            layers = [
-                ("LAYER 1 · RULE ROUTER",
-                 "Complexity classifier — routes simple/medium/complex queries to the right strategy. Zero LLM cost.",
-                 "#4a9eff"),
-                ("LAYER 2 · SIMPLE CHAIN",
-                 "Direct single-step SQL generation. 2 LLM calls (SQL + answer). Used for single-table lookups and basic aggregations.",
-                 "#4a9eff"),
-                ("LAYER 3 · COT CHAIN",
-                 "Chain-of-thought reasoning before SQL generation. Used for joins, GROUP BY, rankings. Fewer errors.",
-                 "#c9a84c"),
-                ("LAYER 4 · REACT AGENT",
-                 "LangGraph ReAct agent with 4 tools (list_tables, get_schema, run_query, check_query). Multi-step reasoning for complex cross-table analysis.",
-                 "#b06aff"),
-                ("LAYER 5 · SQL GUARD",
-                 "Prompt injection check (question + translation). SELECT-only, read-only connection, row limit, timeout. Every execution audited to JSONL.",
-                 "#22aa44"),
-            ]
-
-            for title, desc, color in layers:
-                st.markdown(f"""
-                <div style="
-                    background:#080c14;
-                    border:1px solid #1a2235;
-                    border-left:3px solid {color};
-                    border-radius:3px;
-                    padding:12px 16px;
-                    margin-bottom:10px;
-                ">
-                    <div style="font-family:'IBM Plex Mono',monospace;font-size:0.68rem;
-                        color:{color};margin-bottom:5px;">{title}</div>
-                    <div style="font-family:'IBM Plex Mono',monospace;font-size:0.62rem;
-                        color:#3d5a80;line-height:1.5;">{desc}</div>
-                </div>
-                """, unsafe_allow_html=True)
-
-        with col_b:
-            st.markdown("""
-            <div style="font-family:'IBM Plex Mono',monospace;font-size:0.6rem;
-                letter-spacing:0.18em;color:#3d5a80;margin-bottom:12px;">
-            ◈ BENCHMARK RESULTS</div>
-            """, unsafe_allow_html=True)
-
-            # Numbers come from the latest benchmark run via the API —
-            # nothing is hard-coded here.
-            bench   = fetch_benchmark()
-            metrics = []
-            if bench:
-                ov = bench.get("overall", {})
-                ci = ov.get("execution_accuracy_ci95", [0, 0])
-                metrics.append((
-                    "Execution Accuracy",
-                    f"{ov.get('execution_accuracy', 0):.1%} "
-                    f"(95% CI {ci[0]:.0%}–{ci[1]:.0%})",
-                    "#22aa44",
-                ))
-                for tier, vals in bench.get("by_complexity", {}).items():
-                    metrics.append((f"{tier.title()} Queries", f"{vals['accuracy']:.0%}", "#4a9eff"))
-                for lang, vals in bench.get("by_language", {}).items():
-                    name = "English" if lang == "en" else "Arabic"
-                    metrics.append((f"{name} (n={vals['total']})", f"{vals['accuracy']:.0%}", "#4a9eff"))
-                metrics.append(("Questions", str(bench.get("meta", {}).get("total_questions", "—")), "#3d5a80"))
-            else:
-                metrics.append(("Benchmark", "not run yet — scripts/run_benchmark.py", "#c9a84c"))
-
-            for label, value, color in metrics:
-                st.markdown(f"""
-                <div style="
-                    display:flex;
-                    justify-content:space-between;
-                    padding:8px 0;
-                    border-bottom:1px solid #0d1220;
-                ">
-                    <span style="font-family:'IBM Plex Mono',monospace;font-size:0.65rem;color:#3d5a80;">{label}</span>
-                    <span style="font-family:'IBM Plex Mono',monospace;font-size:0.68rem;color:{color};font-weight:500;">{value}</span>
-                </div>
-                """, unsafe_allow_html=True)
-
-            st.markdown("""
-            <div style="font-family:'IBM Plex Mono',monospace;font-size:0.6rem;
-                letter-spacing:0.18em;color:#3d5a80;margin-top:20px;margin-bottom:12px;">
-            ◈ API ENDPOINTS</div>
-            """, unsafe_allow_html=True)
-
-            endpoints = [
-                ("POST", "/query",       "Single question"),
-                ("POST", "/query/batch", "Batch (max 20)"),
-                ("GET",  "/schema",      "Database schema"),
-                ("GET",  "/health",      "System health"),
-                ("GET",  "/audit/stats", "Compliance stats"),
-                ("GET",  "/docs",        "Swagger UI"),
-            ]
-
-            for method, path, desc in endpoints:
-                color = "#4a9eff" if method == "GET" else "#c9a84c"
-                st.markdown(f"""
-                <div style="display:flex;gap:12px;padding:6px 0;border-bottom:1px solid #0d1220;">
-                    <span style="font-family:'IBM Plex Mono',monospace;font-size:0.6rem;color:{color};min-width:36px;">{method}</span>
-                    <span style="font-family:'IBM Plex Mono',monospace;font-size:0.62rem;color:#c8cfd8;min-width:130px;">{path}</span>
-                    <span style="font-family:'IBM Plex Mono',monospace;font-size:0.6rem;color:#3d5a80;">{desc}</span>
-                </div>
-                """, unsafe_allow_html=True)
+    tabs = st.tabs(["QUERY", "BATCH", "HISTORY", "SCHEMA", "ABOUT"])
+    for tab, show in zip(tabs, [query_tab, batch_tab, history_tab, schema_tab, about_tab]):
+        with tab:
+            show()
 
 
 if __name__ == "__main__":

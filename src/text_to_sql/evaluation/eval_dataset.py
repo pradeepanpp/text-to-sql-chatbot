@@ -1,6 +1,5 @@
-# src/text_to_sql/evaluation/eval_dataset.py
 """
-Evaluation Dataset — Phase 3.
+Evaluation dataset.
 
 100 question/SQL/answer triples covering:
   - All 6 tables
@@ -23,22 +22,13 @@ as a line cost; corrected to order_quantity * total_unit_cost. Margin
 questions now ask for a percentage, and #98 returns only the warehouse.
 """
 
-# ─────────────────────────────────────────────
-# DATASET STRUCTURE
-# Each entry:
-#   question     : natural language question
-#   reference_sql: correct ground truth SQL
-#   reference_ans: expected answer description
-#   complexity   : simple / medium / complex
-#   language     : en / ar
-#   tables       : tables involved
-# ─────────────────────────────────────────────
+# Each entry: question, reference_sql (ground truth), reference_ans (expected
+# answer in words), complexity (simple / medium / complex), language (en / ar),
+# tables (tables involved).
 
 EVAL_DATASET = [
 
-    # ══════════════════════════════════════════
     # SIMPLE — Single table, basic queries (40)
-    # ══════════════════════════════════════════
 
     # customers table (8)
     {
@@ -370,9 +360,7 @@ EVAL_DATASET = [
         "tables":       ["regions"],
     },
 
-    # ══════════════════════════════════════════
     # MEDIUM — Joins, GROUP BY, Rankings (35)
-    # ══════════════════════════════════════════
 
     {
         "question":     "What are the top 5 customers by total line total?",
@@ -655,9 +643,7 @@ EVAL_DATASET = [
         "tables":       ["sales_orders", "regions", "state_regions"],
     },
 
-    # ══════════════════════════════════════════
     # COMPLEX — Multi-table, subqueries (25)
-    # ══════════════════════════════════════════
 
     {
         "question":     "Compare total sales versus 2017 budget for each product",
@@ -861,10 +847,6 @@ EVAL_DATASET = [
     },
 ]
 
-
-# ─────────────────────────────────────────────
-# HELPER FUNCTIONS
-# ─────────────────────────────────────────────
 
 def get_by_complexity(complexity: str) -> list:
     """Filter dataset by complexity tier."""

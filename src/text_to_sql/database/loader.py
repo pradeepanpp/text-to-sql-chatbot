@@ -1,20 +1,19 @@
-# src/text_to_sql/database/loader.py
-
+"""Load the six CSV files into the SQLite database (run once via scripts/setup_database.py)."""
 
 import os
 import sqlite3
+
 import pandas as pd
-from src.text_to_sql.utils.logger import logger
+
 from src.text_to_sql.constants import (
-    TABLE_CUSTOMERS, TABLE_PRODUCTS, TABLE_REGIONS,
-    TABLE_STATE_REGIONS, TABLE_BUDGETS, TABLE_SALES,
+    TABLE_BUDGETS, TABLE_CUSTOMERS, TABLE_PRODUCTS, TABLE_REGIONS, TABLE_SALES, TABLE_STATE_REGIONS,
 )
+from src.text_to_sql.utils.logger import logger
 
-# ── Paths ─────────────────────────────────────
 DATA_DIR = "data/csv"
-DB_PATH  = "database/sales.db"
+DB_PATH = "database/sales.db"
 
-# ── CSV filename → (table_name, column_rename_map) ──
+# CSV file -> (table name, {CSV column: database column})
 CSV_CONFIG = {
     "Customers.csv": (
         TABLE_CUSTOMERS,
@@ -85,56 +84,30 @@ CSV_CONFIG = {
 }
 
 
-def load_all_csvs(
-    data_dir: str = DATA_DIR,
-    db_path:  str = DB_PATH,
-    force:    bool = False
-) -> str:
-    """
-    Load all CSVs into SQLite.
-
-    Args:
-        data_dir: folder containing the CSV files
-        db_path:  path to create/overwrite the SQLite database
-        force:    if True, rebuild even if db already exists
-
-    Returns:
-        Absolute path to the created database
-    """
-    # Skip if already built
+def load_all_csvs(data_dir: str = DATA_DIR, db_path: str = DB_PATH, force: bool = False) -> str:
+    """Build the database from the CSVs. Returns the absolute database path."""
     if os.path.exists(db_path) and not force:
         logger.info(f"Database already exists: {db_path} (use force=True to rebuild)")
         return os.path.abspath(db_path)
 
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-
     logger.info(f"Building SQLite database at {db_path}...")
     conn = sqlite3.connect(db_path)
 
     loaded = []
-    for csv_file, (table_name, col_map) in CSV_CONFIG.items():
+    for csv_file, (table, renames) in CSV_CONFIG.items():
         csv_path = os.path.join(data_dir, csv_file)
         if not os.path.exists(csv_path):
-            logger.warning(f"  Missing CSV: {csv_path} — skipping {table_name}")
+            logger.warning(f"  Missing CSV: {csv_path}, skipping {table}")
             continue
-
         try:
             df = pd.read_csv(csv_path)
-
-            # Rename columns to clean snake_case names
-            # Only rename columns that exist in the file
-            existing_renames = {
-                k: v for k, v in col_map.items() if k in df.columns
-            }
-            df = df.rename(columns=existing_renames)
-
-            # Write to SQLite — replace if exists
-            df.to_sql(table_name, conn, if_exists="replace", index=False)
-            loaded.append(table_name)
-            logger.info(f"  ✓ {table_name:<20} {len(df):>7,} rows  ({csv_file})")
-
+            df = df.rename(columns={k: v for k, v in renames.items() if k in df.columns})
+            df.to_sql(table, conn, if_exists="replace", index=False)
+            loaded.append(table)
+            logger.info(f"  {table:<20} {len(df):>7,} rows  ({csv_file})")
         except Exception as e:
-            logger.error(f"  ✗ Failed to load {csv_file}: {e}")
+            logger.error(f"  Failed to load {csv_file}: {e}")
 
     conn.close()
     logger.info(f"Database ready: {len(loaded)}/6 tables loaded")
@@ -142,28 +115,12 @@ def load_all_csvs(
 
 
 def verify_database(db_path: str = DB_PATH) -> dict:
-    """
-    Verify all tables exist and return row counts.
-
-    Returns:
-        dict mapping table_name → row_count
-    """
+    """Return {table: row count}."""
     if not os.path.exists(db_path):
-        raise FileNotFoundError(
-            f"Database not found: {db_path}\n"
-            "Run: python scripts/setup_database.py"
-        )
+        raise FileNotFoundError(f"Database not found: {db_path}\nRun: python scripts/setup_database.py")
 
-    conn   = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    tables = [row[0] for row in cursor.fetchall()]
-
-    counts = {}
-    for table in tables:
-        cursor.execute(f"SELECT COUNT(*) FROM {table}")
-        counts[table] = cursor.fetchone()[0]
-
+    conn = sqlite3.connect(db_path)
+    tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}
     conn.close()
     return counts

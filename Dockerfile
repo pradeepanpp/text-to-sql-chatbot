@@ -1,9 +1,6 @@
-# Dockerfile — Text-to-SQL API
-# Multi-stage build: builder installs deps, runtime runs the app
+# Text-to-SQL API. Multi-stage build: the builder installs dependencies, the runtime runs the app.
 
-# ─────────────────────────────────────────────
-# Stage 1 — Builder
-# ─────────────────────────────────────────────
+# Stage 1: install dependencies
 FROM python:3.11-slim AS builder
 
 WORKDIR /build
@@ -13,9 +10,7 @@ RUN pip install --upgrade pip && \
     pip install --prefix=/install --no-cache-dir -r requirements.txt
 
 
-# ─────────────────────────────────────────────
-# Stage 2 — Runtime
-# ─────────────────────────────────────────────
+# Stage 2: runtime
 FROM python:3.11-slim AS runtime
 
 WORKDIR /app

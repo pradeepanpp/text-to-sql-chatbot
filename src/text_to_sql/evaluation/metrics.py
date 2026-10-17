@@ -1,4 +1,3 @@
-# src/text_to_sql/evaluation/metrics.py
 """
 Evaluation metrics for Text-to-SQL.
 
@@ -42,7 +41,7 @@ def normalize_value(value):
     if isinstance(value, bytes):
         return value
     text = str(value).strip()
-    try:                                            # "12.50" vs 12.5
+    try:  # "12.50" vs 12.5
         return normalize_value(float(text))
     except ValueError:
         return text
@@ -57,8 +56,8 @@ def _column(rows: list, index: int) -> Counter:
 
 
 def results_match(
-    reference_rows:      list,
-    generated_rows:      list,
+    reference_rows: list,
+    generated_rows: list,
     allow_extra_columns: bool = False,
 ) -> bool:
     """
@@ -80,7 +79,7 @@ def results_match(
     # Candidate generated columns for each reference column:
     # same multiset of values.
     gen_columns = [_column(gen, j) for j in range(n_gen)]
-    candidates  = []
+    candidates = []
     for i in range(n_ref):
         ref_col = _column(ref, i)
         options = [j for j in range(n_gen) if gen_columns[j] == ref_col]
@@ -108,8 +107,8 @@ def wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple:
     """95% Wilson score interval for a proportion, as (low, high) in [0, 1]."""
     if total == 0:
         return (0.0, 0.0)
-    p      = successes / total
-    denom  = 1 + z * z / total
+    p = successes / total
+    denom = 1 + z * z / total
     centre = p + z * z / (2 * total)
     margin = z * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total))
     return (

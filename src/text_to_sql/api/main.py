@@ -1,35 +1,21 @@
-# src/text_to_sql/api/main.py
 """
-FastAPI Application.
+FastAPI app.
 
-Startup sequence:
-  1. Load TextToSQLChain (LLM + SQLGuard + schema context)
-  2. Register routes
-  3. Serve on 0.0.0.0:8000
-
-Run:
-    uvicorn src.text_to_sql.api.main:app --reload --port 8000
-
-Interactive docs:
-    http://localhost:8000/docs    ← Swagger UI
-    http://localhost:8000/redoc   ← ReDoc
-
-Arabic example curl:
-    curl -X POST http://localhost:8000/query \\
-      -H "Content-Type: application/json" \\
-      -d '{"question": "ما هو إجمالي المبيعات؟"}'
+Run:  uvicorn src.text_to_sql.api.main:app --port 8000
+Docs: http://localhost:8000/docs
 """
 
+import os
 import sys
 import time
-import os
+from contextlib import asynccontextmanager
+
 sys.path.append(".")
 
-from contextlib import asynccontextmanager
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -37,149 +23,78 @@ from src.text_to_sql.api.routes import router
 from src.text_to_sql.chain.sql_chain import TextToSQLChain
 from src.text_to_sql.utils.logger import logger
 
+DESCRIPTION = """Ask questions about the sales database in English or Arabic.
 
-# ─────────────────────────────────────────────
-# LIFESPAN — startup / shutdown
-# ─────────────────────────────────────────────
+Each question is routed to one of three SQL strategies: a simple chain,
+chain-of-thought, or a ReAct agent. Every query passes the SQL guard,
+runs on a read-only connection and is written to the audit log."""
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load models at startup, release at shutdown."""
-
-    # ── STARTUP ───────────────────────────────
-    logger.info("=" * 52)
-    logger.info("  Text-to-SQL API — Starting Up")
-    logger.info("=" * 52)
-
-    t0 = time.time()
-
+    """Load the pipeline once at startup. If it fails, /health reports 503."""
+    start = time.time()
     try:
-        logger.info("Loading TextToSQLChain...")
         app.state.chain = TextToSQLChain(
-            db_path     = os.getenv("DB_PATH", "database/sales.db"),
-            model       = os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-            temperature = float(os.getenv("TEMPERATURE", "0.0")),
-            max_tokens  = int(os.getenv("MAX_TOKENS", "500")),
-            row_limit   = int(os.getenv("ROW_LIMIT", "500")),
+            db_path=os.getenv("DB_PATH", "database/sales.db"),
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            temperature=float(os.getenv("TEMPERATURE", "0.0")),
+            max_tokens=int(os.getenv("MAX_TOKENS", "500")),
+            row_limit=int(os.getenv("ROW_LIMIT", "500")),
         )
-        logger.info(f"Chain loaded in {time.time() - t0:.1f}s")
+        logger.info(f"Pipeline loaded in {time.time() - start:.1f}s")
     except Exception as e:
-        logger.error(f"Failed to load chain: {e}")
+        logger.error(f"Failed to load the pipeline: {e}")
         app.state.chain = None
 
-    # Session stats
-    app.state.stats = {
-        "total":   0,
-        "success": 0,
-        "blocked": 0,
-        "failed":  0,
-    }
+    app.state.stats = {"total": 0, "success": 0, "blocked": 0, "failed": 0}
     app.state.start_time = time.time()
-
-    logger.info("=" * 52)
-    logger.info("  API ready — http://localhost:8000")
-    logger.info("  Docs     — http://localhost:8000/docs")
-    logger.info("=" * 52)
-
-    yield   # server runs here
-
-    # ── SHUTDOWN ──────────────────────────────
-    logger.info("Shutting down...")
+    yield
     app.state.chain = None
 
 
-# ─────────────────────────────────────────────
-# APP FACTORY
-# ─────────────────────────────────────────────
-
 def create_app() -> FastAPI:
-    app = FastAPI(
-        title       = "Text-to-SQL API",
-        description = (
-            "Bilingual Arabic-English Text-to-SQL system with multi-strategy "
-            "generation and enterprise safety layer.\n\n"
-            "**Supported languages:** English, Arabic (عربي)\n\n"
-            "**Detection strategies:**\n"
-            "- Simple queries → Direct chain\n"
-            "- Medium queries → Chain-of-Thought\n"
-            "- Complex queries → ReAct Agent\n\n"
-            "**Safety features:**\n"
-            "- Prompt injection detection\n"
-            "- Read-only SQL enforcement\n"
-            "- Row limit protection\n"
-            "- Full audit trail"
-        ),
-        version  = "1.1.0",
-        lifespan = lifespan,
-        docs_url  = "/docs",
-        redoc_url = "/redoc",
-    )
+    app = FastAPI(title="Text-to-SQL API", description=DESCRIPTION, version="1.1.0", lifespan=lifespan)
 
-    # ── CORS ─────────────────────────────────
-    # The Streamlit dashboard calls the API server-side, so CORS only
-    # matters for browser clients. Origins come from CORS_ORIGINS
-    # (comma-separated); credentials are never allowed with "*".
+    # The dashboard calls the API from its server, so CORS only matters for
+    # browser clients. Credentials are never allowed together with "*".
     origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins     = origins,
-        allow_credentials = origins != ["*"],
-        allow_methods     = ["GET", "POST"],
-        allow_headers     = ["*"],
+        allow_origins=origins,
+        allow_credentials=origins != ["*"],
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
     )
 
-    # ── Request logging ───────────────────────
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
-        start    = time.time()
+        start = time.time()
         response = await call_next(request)
-        duration = round((time.time() - start) * 1000, 1)
-        logger.debug(
-            f"{request.method} {request.url.path} "
-            f"→ {response.status_code} ({duration}ms)"
-        )
+        logger.debug(f"{request.method} {request.url.path} {response.status_code} "
+                     f"({(time.time() - start) * 1000:.1f}ms)")
         return response
 
-    # ── Global exception handler ──────────────
     @app.exception_handler(Exception)
-    async def global_exception_handler(request: Request, exc: Exception):
-        # Full error goes to the server log only; the client gets a generic
-        # message so stack details and SQL errors are not leaked.
+    async def unhandled_error(request: Request, exc: Exception):
+        # Details go to the server log only, so SQL errors and stack traces are not leaked
         logger.exception(f"Unhandled exception on {request.url.path}: {exc}")
-        return JSONResponse(
-            status_code = 500,
-            content     = {"error": "Internal server error", "code": 500},
-        )
+        return JSONResponse(status_code=500, content={"error": "Internal server error", "code": 500})
 
-    # ── Routes ────────────────────────────────
     app.include_router(router)
-
     return app
 
-
-# ─────────────────────────────────────────────
-# APP INSTANCE
-# ─────────────────────────────────────────────
 
 app = create_app()
 
 
-# ─────────────────────────────────────────────
-# ENTRYPOINT
-# ─────────────────────────────────────────────
-
 if __name__ == "__main__":
     import uvicorn
 
-    port = int(os.environ.get("PORT", 8000))
-    host = os.environ.get("HOST", "0.0.0.0")
-
-    logger.info(f"Starting server on {host}:{port}")
     uvicorn.run(
         "src.text_to_sql.api.main:app",
-        host      = host,
-        port      = port,
-        reload    = os.environ.get("RELOAD", "0") == "1",
-        workers   = 1,
-        log_level = "warning",
+        host=os.environ.get("HOST", "0.0.0.0"),
+        port=int(os.environ.get("PORT", 8000)),
+        reload=os.environ.get("RELOAD", "0") == "1",
+        log_level="warning",
     )

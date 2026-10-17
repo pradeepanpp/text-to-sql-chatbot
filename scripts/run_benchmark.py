@@ -1,4 +1,3 @@
-# scripts/run_benchmark.py
 """
 Run the benchmark evaluation.
 
@@ -44,13 +43,13 @@ def main():
     logger.info(f"Dataset: {get_summary()}")
 
     report = run_benchmark(
-        sample_size       = args.sample,
-        complexity_filter = args.complexity,
-        language_filter   = args.language,
-        strategy          = args.strategy,
-        allow_fallback    = not args.no_fallback,
-        delay_s           = args.delay,
-        tag               = args.tag,
+        sample_size=args.sample,
+        complexity_filter=args.complexity,
+        language_filter=args.language,
+        strategy=args.strategy,
+        allow_fallback=not args.no_fallback,
+        delay_s=args.delay,
+        tag=args.tag,
     )
     print(format_summary(report))
 

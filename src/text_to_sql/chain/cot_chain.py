@@ -1,30 +1,16 @@
-# src/text_to_sql/chain/cot_chain.py
 """
-Chain-of-Thought (CoT) Chain — reason step by step, then write SQL.
+Chain-of-thought chain, for joins, grouping and rankings.
 
-Used for 2-table joins, GROUP BY, rankings, aggregations.
-
-Strategy: one LLM call that writes its reasoning and then the final SQL
-          -> extract the SQL -> SQLGuard checks + executes (read-only)
-          -> LLM writes the answer from the rows
-LLM calls: 2 (reasoning + SQL in one call, answer formatting)
-
-Examples:
-    "What are the top 5 customers by total sales?"
-    "Which product has the highest average order quantity?"
-    "Show total sales broken down by channel."
+One LLM call writes its reasoning followed by the SQL, the guard runs the
+extracted SQL, and a second call writes the answer.
 """
 
 import re
 
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
 
-from src.text_to_sql.chain.common import (
-    QueryResult,
-    clean_sql,
-    execute_and_answer,
-)
+from src.text_to_sql.chain.common import QueryResult, clean_sql, execute_and_answer
 from src.text_to_sql.utils.logger import logger
 
 STRATEGY = "cot"
@@ -58,34 +44,27 @@ Data: {result}
 
 Answer:""")
 
-# A line that starts the final SQL, e.g. "SQL:", "**SQL:**", "Final SQL:"
-_SQL_MARKER = re.compile(r"(?im)^[ \t*#]*(?:final\s+)?sql[ \t*]*:[ \t*]*")
-_FENCED     = re.compile(r"```(?:sql)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+SQL_MARKER = re.compile(r"(?im)^[ \t*#]*(?:final\s+)?sql[ \t*]*:[ \t*]*")  # "SQL:", "**SQL:**", "Final SQL:"
+FENCED_SQL = re.compile(r"```(?:sql)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 
 
-def _extract_sql_from_cot(raw_output: str) -> str:
+def extract_sql(output: str) -> str:
     """
-    Extract the final SQL query from CoT output.
+    Get the final SQL out of the reasoning text. The SQL often spans several
+    lines, so everything after the last marker is taken, not just that line.
+    (Taking one line dropped the FROM clause and caused
+    "no such column: c.customer_name" in the benchmark.)
 
-    The SQL usually spans several lines, so we take everything AFTER the
-    last marker, not just the marker line. (Taking only the marker line
-    turned "SQL: SELECT c.customer_name ...\\nFROM ..." into a query with
-    no FROM clause, which SQLite rejects with
-    "no such column: c.customer_name".)
-
-    Order of attempts:
-      1. last ```sql fenced block
-      2. text after the last "SQL:" marker line
-      3. text from the last line that starts with SELECT / WITH
-      4. the whole output
+    Tried in order: last fenced block, text after the last "SQL:" line,
+    text from the last line starting with SELECT/WITH, the whole output.
     """
-    text = (raw_output or "").strip()
+    text = (output or "").strip()
 
-    blocks = _FENCED.findall(text)
+    blocks = FENCED_SQL.findall(text)
     if blocks:
         return clean_sql(blocks[-1])
 
-    markers = list(_SQL_MARKER.finditer(text))
+    markers = list(SQL_MARKER.finditer(text))
     if markers:
         tail = text[markers[-1].end():].strip()
         if tail:
@@ -100,43 +79,24 @@ def _extract_sql_from_cot(raw_output: str) -> str:
 
 
 class CoTChain:
-    """Chain-of-thought SQL generation for medium complexity queries."""
-
     def __init__(self, llm, schema: str, db_path: str, guard):
-        self.schema  = schema
+        self.schema = schema
         self.db_path = db_path
-        self.guard   = guard
-        self._chain  = COT_PROMPT | llm | StrOutputParser()
-        self._format = COT_FORMAT_PROMPT | llm | StrOutputParser()
+        self.guard = guard
+        self.sql_chain = COT_PROMPT | llm | StrOutputParser()
+        self.answer_chain = COT_FORMAT_PROMPT | llm | StrOutputParser()
 
     def run(self, question: str, result: QueryResult) -> QueryResult:
-        """Reason, extract SQL, execute through the guard, format the answer."""
-        logger.info("[CoTChain] Running chain-of-thought SQL generation...")
         result.strategy = STRATEGY
-
         try:
-            raw_output = self._chain.invoke({
-                "schema":   self.schema,
-                "question": question,
-            })
-            logger.debug(f"[CoTChain] Reasoning:\n{raw_output[:500]}")
-
-            sql = _extract_sql_from_cot(raw_output)
-
+            output = self.sql_chain.invoke({"schema": self.schema, "question": question})
             result = execute_and_answer(
-                result, sql, self.guard, self.db_path, STRATEGY,
-                answer_fn=lambda _sql, rows: self._format.invoke({
-                    "question": question,
-                    "result":   rows,
-                }),
+                result, extract_sql(output), self.guard, self.db_path, STRATEGY,
+                answer_fn=lambda _sql, rows: self.answer_chain.invoke({"question": question, "result": rows}),
             )
-            if result.execution_success:
-                logger.info("[CoTChain] Success")
-            else:
-                logger.warning(f"[CoTChain] Failed: {result.error}")
-
-        except Exception as e:       # LLM / network errors
+            if not result.execution_success:
+                logger.warning(f"CoT chain failed: {result.error}")
+        except Exception as e:  # LLM or network error
             result.error = str(e)
-            logger.error(f"[CoTChain] Failed: {e}")
-
+            logger.error(f"CoT chain failed: {e}")
         return result

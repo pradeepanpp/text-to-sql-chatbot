@@ -1,4 +1,3 @@
-# src/text_to_sql/language/detector.py
 """
 Language detection for the bilingual pipeline.
 
