@@ -293,6 +293,7 @@ def test_infra_error_detection():
     assert is_infra_error("Error code: 429 - Rate limit reached for gpt-4o-mini")
     assert not is_infra_error("no such column: c.customer_name")
     assert not is_infra_error('near "429": syntax error')
+    assert is_infra_error("Error code: 401 - {'error': {'code': 'invalid_api_key'}}")
 
 
 def test_all_reference_sql_runs(synthetic_db):

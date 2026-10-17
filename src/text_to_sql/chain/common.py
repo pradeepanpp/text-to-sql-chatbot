@@ -74,10 +74,12 @@ def validate_sql_safety(sql: str) -> tuple:
 
 # Matched against lower-cased error text. "error code: 5" covers the
 # OpenAI SDK's "Error code: 500/502/503 - ..." messages.
+
 _INFRA_SIGNALS = (
-    "error code: 429", "rate limit", "ratelimit", "insufficient_quota",
-    "error code: 5", "apiconnectionerror", "connection error",
-    "apitimeouterror", "request timed out", "service unavailable",
+       "error code: 429", "rate limit", "ratelimit", "insufficient_quota",
+       "error code: 401", "error code: 403", "invalid_api_key",
+       "error code: 5", "apiconnectionerror", "connection error",
+       "apitimeouterror", "request timed out", "service unavailable",
 )
 
 
