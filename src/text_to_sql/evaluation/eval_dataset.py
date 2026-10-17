@@ -8,7 +8,13 @@ Evaluation Dataset — Phase 3.
   - English and Arabic questions
   - Edge cases (empty results, aggregations, joins)
 
-Used by RAGAS evaluation and benchmark runner.
+Used by the benchmark runner (evaluation/benchmark.py).
+
+Label fixes (vs. the first benchmark run): two questions were reworded
+because the reference SQL did not answer the question as written —
+"average profit margin across all channels" (reference is per channel)
+and "correlation between order quantity and line total" (reference
+computes averages, not a correlation). The reference SQL is unchanged.
 """
 
 # ─────────────────────────────────────────────
@@ -776,7 +782,7 @@ EVAL_DATASET = [
         "tables":       ["sales_orders", "products", "budgets"],
     },
     {
-        "question":     "What is the average profit margin across all channels?",
+        "question":     "What is the average profit margin for each channel?",
         "reference_sql": "SELECT channel, ROUND(AVG((line_total - total_unit_cost) / line_total * 100), 2) as avg_margin FROM sales_orders GROUP BY channel",
         "reference_ans": "Average profit margin per channel.",
         "complexity":   "complex",
@@ -840,7 +846,7 @@ EVAL_DATASET = [
         "tables":       ["sales_orders", "products", "budgets"],
     },
     {
-        "question":     "What is the correlation between order quantity and line total by product?",
+        "question":     "What are the average order quantity and average line total for each product?",
         "reference_sql": "SELECT p.product_name, AVG(s.order_quantity) as avg_qty, AVG(s.line_total) as avg_value FROM sales_orders s JOIN products p ON s.product_description_index = p.product_index GROUP BY p.product_name ORDER BY avg_value DESC",
         "reference_ans": "Average quantity and value per product.",
         "complexity":   "complex",

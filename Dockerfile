@@ -8,10 +8,6 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /build
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential git \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY requirements.txt .
 RUN pip install --upgrade pip && \
     pip install --prefix=/install --no-cache-dir -r requirements.txt
@@ -32,14 +28,12 @@ COPY --from=builder /install /usr/local
 
 # Copy application source
 COPY src/      src/
-COPY configs/  configs/
 
-# Copy pre-built database and models
-COPY database/ database/
-COPY models/   models/
-
-# Create writable directories
-RUN mkdir -p logs data/eval && \
+# The SQLite database is NOT baked into the image. Build it on the host
+# (python scripts/setup_database.py) and docker-compose mounts
+# ./database read-only. This keeps data out of the image and lets the
+# data change without a rebuild.
+RUN mkdir -p database logs data/eval && \
     chown -R appuser:appuser /app
 
 ENV PYTHONPATH=/app \

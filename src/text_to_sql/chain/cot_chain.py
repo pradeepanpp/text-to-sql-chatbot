@@ -1,13 +1,13 @@
 # src/text_to_sql/chain/cot_chain.py
 """
-Chain-of-Thought (CoT) Chain — Phase 2.
+Chain-of-Thought (CoT) Chain — reason step by step, then write SQL.
 
-Step-by-step reasoning before SQL generation for medium queries.
 Used for 2-table joins, GROUP BY, rankings, aggregations.
 
-Strategy: reason step-by-step → generate SQL → execute
-Speed: medium (~3-5 seconds)
-Cost: medium (~200-400 tokens)
+Strategy: one LLM call that writes its reasoning and then the final SQL
+          -> extract the SQL -> SQLGuard checks + executes (read-only)
+          -> LLM writes the answer from the rows
+LLM calls: 2 (reasoning + SQL in one call, answer formatting)
 
 Examples:
     "What are the top 5 customers by total sales?"
@@ -15,20 +15,19 @@ Examples:
     "Show total sales broken down by channel."
 """
 
-import os
-import sqlite3
-from langchain_openai import ChatOpenAI
+import re
+
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from src.text_to_sql.chain.sql_chain import (
-    clean_sql,
-    validate_sql_safety,
+from src.text_to_sql.chain.common import (
     QueryResult,
+    clean_sql,
+    execute_and_answer,
 )
 from src.text_to_sql.utils.logger import logger
 
-DB_PATH = "database/sales.db"
+STRATEGY = "cot"
 
 COT_PROMPT = ChatPromptTemplate.from_template("""
 You are a SQL expert. Think through this step by step, then write the SQL.
@@ -44,8 +43,9 @@ Think through:
 3. What aggregation or grouping is needed?
 4. What is the final SQL?
 
-After reasoning, output ONLY the final SQL query on the last line,
-starting with "SQL:" prefix. No markdown, no backticks.
+After your reasoning, write a line that says exactly "SQL:" and put the
+final SQLite query after it. The query may span several lines. Write
+nothing after the query. No markdown, no backticks.
 
 Reasoning and SQL:""")
 
@@ -58,105 +58,85 @@ Data: {result}
 
 Answer:""")
 
+# A line that starts the final SQL, e.g. "SQL:", "**SQL:**", "Final SQL:"
+_SQL_MARKER = re.compile(r"(?im)^[ \t*#]*(?:final\s+)?sql[ \t*]*:[ \t*]*")
+_FENCED     = re.compile(r"```(?:sql)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+
 
 def _extract_sql_from_cot(raw_output: str) -> str:
     """
-    Extract the SQL query from CoT output.
-    Looks for 'SQL:' prefix on the last meaningful line.
-    Falls back to clean_sql on the whole output.
+    Extract the final SQL query from CoT output.
+
+    The SQL usually spans several lines, so we take everything AFTER the
+    last marker, not just the marker line. (Taking only the marker line
+    turned "SQL: SELECT c.customer_name ...\\nFROM ..." into a query with
+    no FROM clause, which SQLite rejects with
+    "no such column: c.customer_name".)
+
+    Order of attempts:
+      1. last ```sql fenced block
+      2. text after the last "SQL:" marker line
+      3. text from the last line that starts with SELECT / WITH
+      4. the whole output
     """
-    lines = [l.strip() for l in raw_output.strip().splitlines() if l.strip()]
+    text = (raw_output or "").strip()
 
-    # Look for SQL: prefix
-    for line in reversed(lines):
-        if line.upper().startswith("SQL:"):
-            return clean_sql(line[4:].strip())
+    blocks = _FENCED.findall(text)
+    if blocks:
+        return clean_sql(blocks[-1])
 
-    # Fallback — take last line that looks like SQL
-    for line in reversed(lines):
-        if line.upper().startswith("SELECT"):
-            return clean_sql(line)
+    markers = list(_SQL_MARKER.finditer(text))
+    if markers:
+        tail = text[markers[-1].end():].strip()
+        if tail:
+            return clean_sql(tail)
 
-    # Last resort
-    return clean_sql(raw_output)
+    lines = text.splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        if re.match(r"^\s*(SELECT|WITH)\b", lines[i], re.IGNORECASE):
+            return clean_sql("\n".join(lines[i:]))
+
+    return clean_sql(text)
 
 
 class CoTChain:
     """Chain-of-thought SQL generation for medium complexity queries."""
 
-    def __init__(self, llm: ChatOpenAI, schema: str, db_path: str = DB_PATH):
-        self.llm     = llm
+    def __init__(self, llm, schema: str, db_path: str, guard):
         self.schema  = schema
         self.db_path = db_path
-        self._chain  = COT_PROMPT  | llm | StrOutputParser()
+        self.guard   = guard
+        self._chain  = COT_PROMPT | llm | StrOutputParser()
         self._format = COT_FORMAT_PROMPT | llm | StrOutputParser()
 
     def run(self, question: str, result: QueryResult) -> QueryResult:
-        """
-        Run chain-of-thought SQL generation.
-        Updates and returns the QueryResult.
-        """
+        """Reason, extract SQL, execute through the guard, format the answer."""
         logger.info("[CoTChain] Running chain-of-thought SQL generation...")
+        result.strategy = STRATEGY
 
         try:
-            # Generate with reasoning
             raw_output = self._chain.invoke({
                 "schema":   self.schema,
                 "question": question,
             })
-
-            # Log the reasoning for debugging
             logger.debug(f"[CoTChain] Reasoning:\n{raw_output[:500]}")
 
-            # Extract just the SQL
             sql = _extract_sql_from_cot(raw_output)
 
-            # Safety check
-            is_safe, reason = validate_sql_safety(sql)
-            if not is_safe:
-                result.sql_valid = False
-                result.error     = reason
-                return result
+            result = execute_and_answer(
+                result, sql, self.guard, self.db_path, STRATEGY,
+                answer_fn=lambda _sql, rows: self._format.invoke({
+                    "question": question,
+                    "result":   rows,
+                }),
+            )
+            if result.execution_success:
+                logger.info("[CoTChain] Success")
+            else:
+                logger.warning(f"[CoTChain] Failed: {result.error}")
 
-            result.generated_sql = sql
-            result.sql_valid     = True
-
-            # Execute
-            db_result = self._execute(sql)
-            result.raw_result        = db_result
-            result.execution_success = True
-
-            # Format response
-            result.natural_response = self._format.invoke({
-                "question": question,
-                "result":   db_result,
-            }).strip()
-
-            logger.info("[CoTChain] Success")
-
-        except Exception as e:
+        except Exception as e:       # LLM / network errors
             result.error = str(e)
             logger.error(f"[CoTChain] Failed: {e}")
 
         return result
-
-    def _execute(self, sql: str) -> str:
-        conn   = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(sql)
-        rows = cursor.fetchmany(50)
-
-        if not rows:
-            conn.close()
-            return "No results found."
-
-        cols  = [d[0] for d in cursor.description]
-        lines = [" | ".join(cols), "-" * 40]
-        for row in rows:
-            lines.append(" | ".join(str(v) for v in row))
-
-        if len(rows) == 50:
-            lines.append("(showing first 50 rows)")
-
-        conn.close()
-        return "\n".join(lines)
