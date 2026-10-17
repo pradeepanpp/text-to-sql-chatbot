@@ -59,38 +59,9 @@ Chain-of-thought for every question is as accurate as the routed system; routing
 
 ## Architecture
 
-```
-Question (English or Arabic)
-        │
-        ▼
- Language detection
-        │
-        ▼
- Input guard ── prompt-injection patterns ──► blocked
-        │
-        ▼
- Arabic only: translate to English, then check the translation again
-        │
-        ▼
- Complexity router (rules, no LLM call)
-        │
-   ┌────┼──────────────┐
-   ▼    ▼              ▼
- Simple  Chain-of-     ReAct agent
- chain   thought       (LangGraph, 4 tools)
-   └────┬──────────────┘
-        ▼
- SQL guard ── SELECT-only · write-keyword block · row limit (500)
-        │
-        ▼
- Read-only SQLite (10s timeout) ──► audit log (JSONL)
-        │
-        ▼
- Self-correction on SQL error (up to 3 retries)
-        │
-        ▼
- Answer (translated back to Arabic if needed)
-```
+<p align="center">
+  <img src="docs/images/how-it-works.png" alt="How a question becomes an answer: understand, write SQL, run safely" width="100%">
+</p>
 
 | Strategy | Used for | LLM calls |
 |---|---|---|
