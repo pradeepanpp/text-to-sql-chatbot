@@ -230,7 +230,12 @@ class AgentChain:
             language = result.detected_language,
             executed = executed,
         )
-        agent = create_react_agent(self.llm, tools, prompt=AGENT_SYSTEM_PROMPT)
+                # Give the agent the same schema context the other strategies get
+        # (descriptions, foreign keys, allowed values). Without it the agent
+        # only sees raw column names from PRAGMA and guesses joins.
+        prompt = f"{AGENT_SYSTEM_PROMPT}\n\n{self.schema}"
+        agent  = create_react_agent(self.llm, tools, prompt=prompt)
+       
 
         state = agent.invoke(
             {"messages": [("user", question)]},
