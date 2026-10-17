@@ -22,7 +22,7 @@ import json
 import os
 import threading
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from src.text_to_sql.api.schemas import (
     QueryRequest,
@@ -244,11 +244,15 @@ def schema(request: Request):
     response_model = HealthResponse,
     tags           = ["system"],
     summary        = "System health check",
+    responses      = {503: {"description": "Degraded: a component is unavailable"}},
 )
-def health(request: Request):
+def health(request: Request, response: Response):
     """
-    - **ok**: chain loaded, guard active, database readable
-    - **degraded**: one or more components unavailable
+    - **200 ok**: chain loaded, guard active, database readable
+    - **503 degraded**: one or more components unavailable
+
+    Returning 503 (not 200) when degraded lets Docker's healthcheck and
+    load balancers take an unhealthy instance out of service.
     """
     chain    = request.app.state.chain
     chain_ok = chain is not None
@@ -267,8 +271,12 @@ def health(request: Request):
     if chain_ok:
         model = getattr(chain.llm, "model_name", model)
 
+    healthy = chain_ok and guard_ok and db_ok
+    if not healthy:
+        response.status_code = 503
+
     return HealthResponse(
-        status       = "ok" if (chain_ok and guard_ok and db_ok) else "degraded",
+        status       = "ok" if healthy else "degraded",
         chain_loaded = chain_ok,
         guard_active = guard_ok,
         db_connected = db_ok,

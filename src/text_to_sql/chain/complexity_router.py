@@ -28,7 +28,6 @@ from src.text_to_sql.constants import (
     COMPLEXITY_SIMPLE,
     COMPLEXITY_MEDIUM,
     COMPLEXITY_COMPLEX,
-    ALL_TABLES,
 )
 
 

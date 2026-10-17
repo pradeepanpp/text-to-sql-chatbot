@@ -29,7 +29,7 @@ load_dotenv()
 from src.text_to_sql.chain.common import (       # re-exported for older imports
     QueryResult,
     clean_sql,
-    validate_sql_safety,
+    validate_sql_safety,  # noqa: F401  (re-exported for older imports)
     is_infra_error,
     execute_and_answer,
 )

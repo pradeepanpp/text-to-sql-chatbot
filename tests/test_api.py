@@ -195,7 +195,7 @@ def test_batch_query():
     r = client.post("/query/batch", json={"questions": questions})
     assert r.status_code == 200
     data = r.json()
-    print(f"✅ Test 15: POST /query/batch → 200")
+    print("✅ Test 15: POST /query/batch → 200")
 
     # Test 16 — correct count
     assert data["total"] == len(questions)
@@ -210,7 +210,7 @@ def test_batch_query():
 
     # Test 18 — injection in batch is blocked
     assert data["blocked_count"] >= 1
-    print(f"✅ Test 18: Injection in batch correctly blocked")
+    print("✅ Test 18: Injection in batch correctly blocked")
 
     # Test 19 — all results have required schema
     for result in data["results"]:
@@ -227,14 +227,14 @@ def test_schema_endpoint():
     r = client.get("/schema")
     assert r.status_code == 200
     data = r.json()
-    print(f"✅ Test 20: GET /schema → 200")
+    print("✅ Test 20: GET /schema → 200")
 
     # Test 21 — has tables
     assert "tables"       in data
     assert "total_tables" in data
     assert "total_rows"   in data
     assert data["total_tables"] == 6
-    print(f"✅ Test 21: 6 tables returned")
+    print("✅ Test 21: 6 tables returned")
 
     # Test 22 — each table has required fields
     for table in data["tables"]:
@@ -296,7 +296,7 @@ def test_audit_stats():
     r = client.get("/audit/stats")
     assert r.status_code == 200
     data = r.json()
-    print(f"✅ Test 31: GET /audit/stats → 200")
+    print("✅ Test 31: GET /audit/stats → 200")
 
     # Test 32 — required fields
     assert "total"       in data
@@ -313,7 +313,7 @@ def test_audit_stats():
     # Test 34 — counts are non-negative
     assert data["total"]   >= 0
     assert data["blocked"] >= 0
-    print(f"✅ Test 34: All counts non-negative")
+    print("✅ Test 34: All counts non-negative")
 
 
 def test_response_consistency():

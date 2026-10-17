@@ -16,7 +16,6 @@ from src.text_to_sql.evaluation.eval_dataset import (
     EVAL_DATASET,
     get_by_complexity,
     get_by_language,
-    get_summary,
 )
 
 RESULTS_JSON = "data/eval/benchmark_results.json"

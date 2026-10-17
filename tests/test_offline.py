@@ -338,8 +338,36 @@ def test_api_query_and_health(synthetic_db, audit_log):
         assert body["execution_success"] and body["strategy"] == "simple"
         assert body["row_count"] == 1
 
-        h = client.get("/health").json()
-        assert h["db_connected"] and h["guard_active"]
+        h = client.get("/health")
+        assert h.status_code == 200
+        assert h.json()["db_connected"] and h.json()["guard_active"]
 
         assert client.post("/query", json={"question": "  "}).status_code == 422
         assert client.post("/query", json={"question": "hi", "language": "fr"}).status_code == 422
+
+
+def test_health_returns_503_when_degraded(synthetic_db):
+    """Docker's healthcheck and load balancers rely on the status code."""
+    from fastapi.testclient import TestClient
+    from src.text_to_sql.api.main import app
+
+    with TestClient(app) as client:
+        app.state.chain = None                      # e.g. chain failed to load
+        r = client.get("/health")
+        assert r.status_code == 503
+        assert r.json()["status"] == "degraded"
+
+
+# ─────────────────────────────────────────────
+# DASHBOARD
+# ─────────────────────────────────────────────
+
+def test_dashboard_escapes_html():
+    pytest.importorskip("streamlit")
+    from src.text_to_sql.dashboard.components import esc
+
+    assert esc("SELECT * FROM t WHERE a<b") == "SELECT * FROM t WHERE a&lt;b"
+    assert esc('<img src=x onerror="alert(1)">') == (
+        "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;"
+    )
+    assert esc(None) == ""

@@ -1,13 +1,21 @@
 # src/text_to_sql/dashboard/components.py
 """
-Reusable Streamlit UI components — Phase 6.
+Reusable Streamlit UI components.
 
-Aesthetic: Refined dark Gulf — deep navy backgrounds,
-gold accents, clean monospace data display.
-Evokes UAE fintech/government dashboards.
+Every value that comes from the API — the user's question, the LLM's
+answer, generated SQL, table metadata — is passed through esc() before
+it is placed inside HTML. Without escaping, a "<" in SQL or a crafted
+question would be interpreted as markup.
 """
 
+from html import escape
+
 import streamlit as st
+
+
+def esc(value) -> str:
+    """HTML-escape any value for safe interpolation into st.html()."""
+    return escape(str(value if value is not None else ""))
 
 
 # ─────────────────────────────────────────────
@@ -203,8 +211,8 @@ def render_result(data: dict):
     blocked  = data.get("blocked", False)
     success  = data.get("execution_success", False)
     lang     = data.get("detected_language", "en")
-    response = data.get("natural_response", "")
-    sql      = data.get("generated_sql", "")
+    response = esc(data.get("natural_response", ""))
+    sql      = esc(data.get("generated_sql", ""))
     complex_ = data.get("complexity", "simple")
     retries  = data.get("retries_used", 0)
 
@@ -237,7 +245,7 @@ def render_result(data: dict):
                 font-size:0.78rem;
                 color:#6b6b7e;
                 margin-top:10px;
-            ">{data.get('block_reason', '')}</div>
+            ">{esc(data.get('block_reason', ''))}</div>
         </div>
         """)
         return
@@ -295,7 +303,7 @@ def render_result(data: dict):
                     letter-spacing:0.18em;
                     color:{c_color};
                     text-transform:uppercase;
-                ">{complex_}</span>
+                ">{esc(complex_)}</span>
                 <span style="
                     font-family:'IBM Plex Mono',monospace;
                     font-size:0.75rem;
@@ -379,6 +387,8 @@ def render_history(history: list):
         q_preview = item.get("question", "")[:52]
         if len(item.get("question","")) > 52:
             q_preview += "…"
+        q_preview = esc(q_preview)
+        complex_  = esc(complex_)
 
         rows += f"""
         <tr style="border-bottom:1px solid #f0ede8;">
@@ -429,17 +439,17 @@ def render_schema(schema_data: dict):
     """)
 
     for table in tables:
-        name    = table["name"]
+        name    = esc(table["name"])
         count   = table["row_count"]
         cols    = table["columns"]
-        desc    = table.get("description", "")
+        desc    = esc(table.get("description", ""))
 
         # Row bar — proportional to largest table
         max_rows   = max(t["row_count"] for t in tables) or 1
         bar_pct    = int((count / max_rows) * 100)
 
         col_pills  = " &nbsp;".join(
-            f'<span style="color:#1a6bbf;opacity:0.8;">{c}</span>'
+            f'<span style="color:#1a6bbf;opacity:0.8;">{esc(c)}</span>'
             for c in cols
         )
 
@@ -508,12 +518,12 @@ def render_sidebar(api_status: dict | None, session_stats: dict):
     """)
 
     if api_status:
-        status     = api_status.get("status", "unknown")
+        status     = esc(api_status.get("status", "unknown"))
         s_color    = "#22aa44" if status == "ok" else "#b5872a"
         chain_ok   = api_status.get("chain_loaded", False)
         guard_ok   = api_status.get("guard_active", False)
         db_ok      = api_status.get("db_connected", False)
-        model      = api_status.get("model", "—")
+        model      = esc(api_status.get("model", "—"))
 
         st.html(f"""
         <div style="

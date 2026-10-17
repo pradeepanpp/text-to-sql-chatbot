@@ -6,6 +6,7 @@ Bilingual Arabic–English natural language querying over a SQLite sales databas
 [![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
 [![LangChain](https://img.shields.io/badge/Framework-LangChain-green.svg)](https://www.langchain.com/)
 [![LangGraph](https://img.shields.io/badge/Agent-LangGraph-red.svg)](https://www.langchain.com/langgraph)
+[![CI](https://github.com/pradeepanpp/text-to-sql-chatbot/actions/workflows/ci.yml/badge.svg)](https://github.com/pradeepanpp/text-to-sql-chatbot/actions/workflows/ci.yml)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-teal.svg)](https://fastapi.tiangolo.com/)
 
 </div>
@@ -18,7 +19,7 @@ Bilingual Arabic–English natural language querying over a SQLite sales databas
 
 ## At a glance
 
-**Problem.** Business users — sales managers, regional leads, finance — need answers from relational data but do not write SQL. BI dashboards only answer the questions someone built in advance, ad-hoc requests queue up with analysts, and in Arabic-speaking teams many users prefer to ask in Arabic. Letting an LLM write SQL against a production database also raises two hard questions: *is the answer correct*, and *can the model be tricked into changing or leaking data*?
+**Problem.** Business users, sales managers, regional leads, finance need answers from relational data but do not write SQL. BI dashboards only answer the questions someone built in advance, ad-hoc requests queue up with analysts, and in Arabic-speaking teams many users prefer to ask in Arabic. Letting an LLM write SQL against a production database also raises two hard questions: *is the answer correct*, and *can the model be tricked into changing or leaking data*?
 
 **Solution.** A bilingual (English / Arabic) natural-language-to-SQL assistant. A question is routed by complexity to one of three SQL generation strategies, every generated query passes a safety layer and runs on a **read-only** connection, every execution is written to an audit log, and the answer comes back in the user's language together with the SQL that produced it.
 
@@ -211,8 +212,11 @@ streamlit run src/text_to_sql/dashboard/app.py
 ### Tests
 
 ```bash
-pytest -q
+pytest -q          # tests (live suites skip automatically without an API key / data)
+ruff check .       # lint
 ```
+
+CI (GitHub Actions) runs lint, the offline test suite and both Docker image builds on every push and pull request.
 
 `tests/test_offline.py` needs no API key or data: it runs the real pipeline on a synthetic database with a scripted fake LLM (read-only enforcement, blocking before execution, Arabic injection, CoT SQL extraction, agent bookkeeping, benchmark scoring, API). The live suites (`test_chain.py`, `test_api.py`, `test_database.py`, `test_evaluation.py`) run automatically when `OPENAI_API_KEY`, `database/sales.db` and benchmark results are present.
 

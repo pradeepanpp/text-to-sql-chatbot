@@ -72,7 +72,8 @@ def init_state():
 def fetch_health() -> dict | None:
     try:
         r = requests.get(f"{API_BASE}/health", timeout=2)
-        return r.json() if r.status_code == 200 else None
+        # 503 = API is up but degraded; its body still lists component status
+        return r.json() if r.status_code in (200, 503) else None
     except Exception:
         return None
 
@@ -303,7 +304,7 @@ def main():
         run_batch = st.button("RUN BATCH →")
 
         if run_batch:
-            lines = [l.strip() for l in batch_input.split("\n") if l.strip()]
+            lines = [line.strip() for line in batch_input.split("\n") if line.strip()]
             if not lines:
                 st.warning("Enter at least one question.")
             elif len(lines) > 20:

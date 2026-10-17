@@ -14,7 +14,6 @@ import sqlite3
 from src.text_to_sql.database.loader import verify_database
 from src.text_to_sql.database.schema import (
     build_schema_context,
-    get_table_names,
     get_column_names,
 )
 from src.text_to_sql.constants import ALL_TABLES, TABLE_SALES, TABLE_CUSTOMERS
